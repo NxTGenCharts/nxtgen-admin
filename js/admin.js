@@ -224,6 +224,7 @@
         <td>${_admTimeAgo(s.created_at)}</td>
         <td class="adm-row-actions" onclick="event.stopPropagation()">
           <button title="Edit" onclick="_admEdit('${s.id}')">${icn('ic-edit')}</button>
+          <button title="Add Update" onclick="_admAddUpdate('${s.id}')">${icn('ic-notebook')}</button>
           <button title="Delete" onclick="_admDeleteOne('${s.id}')">${icn('ic-trash')}</button>
         </td>
       </tr>`;
@@ -362,13 +363,51 @@
     if (typeof window._sigOpenModal === 'function') { window._sigOpenModal('edit', id); }
   };
 
-  // "New Signal" from the Admin page reuses the Signals page's own modal —
-  // simplest to jump to that page and open it there, so autosave/drafts
-  // behave exactly as they already do everywhere else in the app.
-  window._admGoCreateSignal = function () {
-    const sbEl = document.querySelector(`.sb-item[onclick*="nav('signals'"]`);
-    if (typeof nav === 'function') nav('signals', sbEl, 'Signals');
-    setTimeout(() => { if (typeof window._sigOpenModal === 'function') window._sigOpenModal(); }, 60);
+  // "Add Update" (log a stage change / note against a live or closed signal)
+  // is a separate modal+overlay from Edit in signals.js (_sigOpenUpdateModal,
+  // not _sigOpenModal) — same buildSignals()-first pattern as Edit above, so
+  // _sigAll is populated before it looks the signal up.
+  window._admAddUpdate = async function (id) {
+    if (typeof window.buildSignals === 'function') { await window.buildSignals(); }
+    if (typeof window._sigOpenUpdateModal === 'function') { window._sigOpenUpdateModal(id); }
+  };
+
+  // "New Signal" from the Admin page — reuses the Signals page's own modal
+  // (no second modal to maintain), but no longer routes through nav('signals').
+  // admin-gate.js hard-locks nav() to always land on Admin on this subdomain,
+  // so a nav('signals', ...) call here would silently bounce back to Admin
+  // and buildSignals() (which loads _sigAll and builds the modal's supporting
+  // state) would never run. Calling buildSignals() directly — exactly like
+  // _admEdit above already does — loads that state invisibly into the
+  // hidden #page-signals container without switching pages, then opens the
+  // modal on top of Admin.
+  window._admGoCreateSignal = async function () {
+    if (typeof window.buildSignals === 'function') { await window.buildSignals(); }
+    if (typeof window._sigOpenModal === 'function') { window._sigOpenModal(); }
+  };
+
+  // The modal's own save paths (new/edit/draft/publish, all in signals.js)
+  // only refresh the hidden Signals page — never this Admin table. Rather
+  // than touching several call sites inside signals.js, wrap the one
+  // function every one of those paths already calls on success: closing
+  // the modal. Runs after signals.js defines the original (script order:
+  // signals.js, then this file), so it's safe to wrap here.
+  const _admOrigSigCloseModal = window._sigCloseModal;
+  window._sigCloseModal = function () {
+    if (typeof _admOrigSigCloseModal === 'function') _admOrigSigCloseModal();
+    if (_admIsAdmin() && document.getElementById('adm-table-root')) {
+      _admFetchAll().then(rows => { _admAll = rows; _admSelected.clear(); _admRender(); });
+    }
+  };
+
+  // _sigOpenUpdateModal ("Add Update") uses its own separate overlay/close
+  // function, not _sigOpenModal/_sigCloseModal above — wrap it the same way.
+  const _admOrigSigCloseUpdateModal = window._sigCloseUpdateModal;
+  window._sigCloseUpdateModal = function () {
+    if (typeof _admOrigSigCloseUpdateModal === 'function') _admOrigSigCloseUpdateModal();
+    if (_admIsAdmin() && document.getElementById('adm-table-root')) {
+      _admFetchAll().then(rows => { _admAll = rows; _admSelected.clear(); _admRender(); });
+    }
   };
 
 })();
