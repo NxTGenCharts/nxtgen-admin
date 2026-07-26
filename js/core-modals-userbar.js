@@ -345,8 +345,10 @@ document.addEventListener('DOMContentLoaded', async function () {
   // (Nav-item visibility only — the real access control is Supabase RLS.)
   if (typeof window._admRevealNav === 'function') window._admRevealNav();
 
-  // 3c. This deployment is the admin-only subdomain — verify the signed-in
-  // account is actually the admin, and stop here entirely if not.
+  // 3c. On admin.nxtgencharts.site only: verify the signed-in account is
+  // actually the admin, and stop here entirely if not. _admGateEnforce()
+  // itself checks the hostname, is a no-op on app.nxtgencharts.site, and
+  // never touches the session — see js/admin-gate.js for why.
   if (typeof window._admGateEnforce === 'function') {
     const _admOk = await window._admGateEnforce();
     if (!_admOk) return;
