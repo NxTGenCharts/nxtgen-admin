@@ -30,7 +30,11 @@ function nav(pageId, sbEl, label, extra, _skipPush) {
   if (pageId === 'ai') { buildAI(); }
   if (pageId === 'backtesting') { buildBacktestingLab(); _btRenderSessionGrid(); _blRenderGalleryControls(); _blRenderGallery(); _blRenderComparisonTable(); }
   if (pageId === 'signals' && typeof buildSignals === 'function') { buildSignals(); }
-  if (pageId === 'admin' && typeof buildAdmin === 'function') { buildAdmin(); }
+  // Stashed on window so the initial-boot sequence (core-modals-userbar.js)
+  // can await this exact call before hiding the loading splash — avoids a
+  // second, duplicate fetch while still guaranteeing the Admin page's data
+  // is fully loaded before reveal.
+  if (pageId === 'admin' && typeof buildAdmin === 'function') { window._admBuildPromise = buildAdmin(); }
   if (pageId === 'profile') { setTimeout(buildProfile, 0); }
   // Sync mobile bottom nav
   mobNavActivate(pageId);

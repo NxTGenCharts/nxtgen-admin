@@ -325,16 +325,26 @@ function _applyCalToggle(visible) {
 }
 
 document.addEventListener('DOMContentLoaded', async function () {
+  // Global Loading Manager — keeps the branded splash (js/app-loader.js) up
+  // front until every startup task below has actually finished, so the
+  // Admin console never appears half-loaded (no empty stat cards, no
+  // partially-loaded signal table, no filters/buttons popping in late).
+  // Wrapped in try/finally so any failure below still reaches the hide()
+  // call instead of stranding the user on the splash forever.
+  if (window.AppLoader) window.AppLoader.show();
+
+  try {
 
   // 1. Theme first (prevents flash)
   loadTheme();
 
   // 2. Auth guard — redirect to login if not signed in
+  if (window.AppLoader) window.AppLoader.setMessage('Preparing Admin Dashboard...');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) {
     const next = location.pathname !== '/' ? '?next=' + encodeURIComponent(location.pathname) : '';
     window.location.replace('./login.html' + next);
-    return;
+    return; // splash stays up through the redirect — nothing to hide
   }
   _currentUser = session.user;
 
@@ -348,7 +358,9 @@ document.addEventListener('DOMContentLoaded', async function () {
   // 3c. On admin.nxtgencharts.site only: verify the signed-in account is
   // actually the admin, and stop here entirely if not. _admGateEnforce()
   // itself checks the hostname, is a no-op on app.nxtgencharts.site, and
-  // never touches the session — see js/admin-gate.js for why.
+  // never touches the session — see js/admin-gate.js for why. If it denies
+  // access it replaces document.body itself, so the splash (also part of
+  // body) is removed along with everything else — nothing left to hide.
   if (typeof window._admGateEnforce === 'function') {
     const _admOk = await window._admGateEnforce();
     if (!_admOk) return;
@@ -360,6 +372,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   });
 
   // 5. Load data from Supabase - parallel for speed
+  if (window.AppLoader) window.AppLoader.setMessage('Loading signals...');
   loadTrashSettings();
   await Promise.all([
     loadTrades(),
@@ -380,6 +393,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   _pnlToggleMode = (_profileData.currency && _profileData.currency !== '% (Percentage)') ? '$' : '%';
 
   // 6. Render all UI
+  if (window.AppLoader) window.AppLoader.setMessage('Syncing admin data...');
   updateKPIs();
   buildPairTable();
   buildKillzoneTable();
@@ -421,9 +435,29 @@ document.addEventListener('DOMContentLoaded', async function () {
   updateClock();
   setInterval(updateClock, 1000);
 
-  // 8. Mobile bottom nav + calendar toggle + route to the page matching the current URL
+  // 8. Mobile bottom nav + calendar toggle + route to the page matching the
+  // current URL. On this subdomain that route is always Admin (see
+  // js/admin-gate.js), which kicks off buildAdmin() — fetching signal
+  // statistics, the full signal table, drafts, and archived signals, then
+  // rendering them. nav-dashboard-trades.js stashes that call's promise on
+  // window._admBuildPromise; await it here so the splash stays up until
+  // the Admin page's own data (not just the shared trading data above) has
+  // actually finished loading and rendering — otherwise the stat cards and
+  // table would still pop in empty right after the splash fades.
+  if (window.AppLoader) window.AppLoader.setMessage('Loading system statistics...');
   _routeFromLocation();
+  if (window._admBuildPromise) await window._admBuildPromise;
   _initCalToggle();
+
+  } catch (err) {
+    console.error('[Admin init] startup failed:', err);
+    if (typeof showToast === 'function') showToast('Something went wrong while loading — please refresh.', 'danger');
+  } finally {
+    // Trading data, Admin stats, the signal table, drafts, and archived
+    // signals have all loaded and rendered by this point (or we hit an
+    // error above) — reveal the console and dismiss the splash.
+    if (window.AppLoader) window.AppLoader.hide();
+  }
 });
 
 // ── CUSTOM ACCOUNTS — Cloud-synced via journal_account_data ──────────────
