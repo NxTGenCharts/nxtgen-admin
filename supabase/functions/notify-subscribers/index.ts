@@ -179,14 +179,21 @@ const LEGAL_LINKS = {
   privacy: `${MARKETING_URL}/privacy`
 };
 
-// Single dark-glyph logo, always rendered on a fixed white chip in the
-// header (see renderEmailShell) so it stays legible in both light and dark
-// mode without depending on any client's dark-mode CSS support. Host it
-// somewhere public (Supabase Storage public bucket, or /public in your
-// app) and paste the URL here. Until it points to a real file the <img>
-// tag just shows a broken-image icon — the fallback text-only layout
-// still works underneath.
+// Two flat renders of the same logo — dark glyph for the light-mode email,
+// light glyph for the dark-mode email (toggled by the .logo-light/
+// .logo-dark classes — see staticDarkModeCss() and the header markup in
+// renderEmailShell()). Host both somewhere public (Supabase Storage public
+// bucket, or /public in your app) and paste the URLs here. Until they
+// point to real, genuinely distinct files the <img> tags just show broken-
+// image icons or an invisible same-color-as-background logo — the
+// fallback text-only layout still works underneath either way.
 const LOGO_LIGHT_URL = `${APP_URL}/email-assets/logo-light-mode.png`;
+// Distinct light/white-glyph render of the same mark, shown only when
+// .logo-dark is toggled visible by the dark-mode CSS below. This MUST be a
+// different file from LOGO_LIGHT_URL — a dark glyph swapped onto a dark
+// card is indistinguishable from "no logo at all", which is exactly what
+// dark-mode recipients were seeing when this was unset/duplicated.
+const LOGO_DARK_URL = `${APP_URL}/email-assets/logo-dark-mode.png`;
 
 let _vapidReady = false;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -677,6 +684,7 @@ function buildSummaryCard(signal: SignalRow, timezone: string): string {
 function staticDarkModeCss(theme: KindTheme): string {
   return `
 <style>
+  .logo-dark { display: none; }
   @media (prefers-color-scheme: dark) {
     .bg-page { background: #0b0e14 !important; }
     .bg-card { background: #12151d !important; border-color: #232733 !important; }
@@ -686,6 +694,8 @@ function staticDarkModeCss(theme: KindTheme): string {
     .border-t { border-color: #232733 !important; }
     .badge { background: #1e293b !important; color: #93c5fd !important; }
     .kind-badge { background: ${theme.accentBgDark} !important; color: ${theme.accentDark} !important; }
+    .logo-light { display: none !important; }
+    .logo-dark { display: inline-block !important; }
   }
   [data-ogsc] .bg-page { background: #0b0e14 !important; }
   [data-ogsc] .bg-card { background: #12151d !important; border-color: #232733 !important; }
@@ -695,6 +705,8 @@ function staticDarkModeCss(theme: KindTheme): string {
   [data-ogsc] .border-t { border-color: #232733 !important; }
   [data-ogsc] .badge { background: #1e293b !important; color: #93c5fd !important; }
   [data-ogsc] .kind-badge { background: ${theme.accentBgDark} !important; color: ${theme.accentDark} !important; }
+  [data-ogsc] .logo-light { display: none !important; }
+  [data-ogsc] .logo-dark { display: inline-block !important; }
 </style>`;
 }
 
@@ -720,26 +732,24 @@ ${preheader(preheaderText)}
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
             <td align="left">
               <!--
-                Logo lockup: fixed white chip behind the dark-glyph mark,
-                shown identically in light and dark mode — no swap.
-                The old approach tried to swap in a light-glyph PNG on dark
-                backgrounds via @media (prefers-color-scheme: dark), but
-                that swap depends on the mail client actually honouring
-                that media query. A lot of mobile mail apps (Gmail's apps
-                chief among them) render <style> blocks inconsistently, so
-                the swap silently never fired and the dark-glyph PNG kept
-                showing straight on the app's own dark background — same
-                black logo in both modes, exactly the bug being reported.
-                Pinning a permanent light chip behind the mark removes that
-                dependency entirely: the logo's visibility no longer relies
-                on which client this happens to be rendered in.
+                Two flat renders of the same mark: dark glyph for light
+                mode, light glyph for dark mode, toggled via the
+                .logo-light/.logo-dark classes in staticDarkModeCss(). No
+                background chip — a bare swap, so each glyph sits directly
+                against the card's own background (white in light mode,
+                #12151d in dark mode per .bg-card).
+
+                IMPORTANT: this only works if LOGO_DARK_URL actually points
+                to a distinct, genuinely light/white-colored PNG. If dark
+                mode still shows nothing, the file at that URL either
+                doesn't exist yet or is a duplicate of the light-mode
+                asset — a light-glyph image on a dark card is easy to
+                mistake for "still broken" when it's actually a missing/
+                wrong asset rather than a CSS problem.
               -->
-              <table role="presentation" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;">
-                <tr><td style="padding:6px 10px;">
-                  <img src="${LOGO_LIGHT_URL}" width="128" alt="NxTGen Trading Journal" style="display:inline-block;height:auto;max-width:128px;border:0;outline:none;vertical-align:middle;">
-                </td></tr>
-              </table>
-              <div class="text-muted" style="margin-top:6px;color:#9ca3af;font-size:11px;font-weight:600;letter-spacing:0.3px;text-transform:uppercase;">Professional Trading Signals</div>
+              <img src="${LOGO_LIGHT_URL}" width="128" alt="NxTGen Trading Journal" class="logo-light" style="display:inline-block;height:auto;max-width:128px;border:0;outline:none;vertical-align:middle;">
+              <img src="${LOGO_DARK_URL}" width="128" alt="NxTGen Trading Journal" class="logo-dark" style="display:none;height:auto;max-width:128px;border:0;outline:none;vertical-align:middle;">
+              <div class="text-muted" style="margin-top:6px;color:#9ca3af;font-size:11px;font-weight:600;letter-spacing:0.3px;text-transform:uppercase;">Signals by NxTGen Charts</div>
             </td>
           </tr></table>
         </td></tr>
