@@ -61,6 +61,12 @@ interface NotifyRequestBody {
   direction?: 'buy' | 'sell';
   event_type: 'published' | 'edited' | 'status_changed' | string;
   message?: string;
+  // Column names (journal_signals keys, e.g. ['order_type','entry']) the
+  // client detected as changed when it diffed the pre-edit and post-edit
+  // row before calling this function. Optional so older callers keep
+  // working — when it's missing the 'edited' email just falls back to a
+  // generic "signal details were updated" line instead of naming fields.
+  changed_fields?: string[];
 }
 
 // Subset of journal_signals columns the templates actually use — selected
@@ -118,6 +124,7 @@ interface EmailContext {
   message: string;
   recipientName: string | null; // null -> template falls back to a generic greeting
   timezone: string; // resolved IANA zone — see resolveTimeZone()
+  changedFields?: string[]; // only meaningful when kind === 'edited' — see describeChangedFields()
 }
 
 interface RenderedEmail {
@@ -172,13 +179,14 @@ const LEGAL_LINKS = {
   privacy: `${MARKETING_URL}/privacy`
 };
 
-// Two flat-color renders of the same logo — dark glyph for the light-mode
-// email, light glyph for the dark-mode email. Host both somewhere public
-// (Supabase Storage public bucket, or /public in your app) and paste the
-// URLs here. Until these point to real files the <img> tags just show
-// broken-image icons — the fallback text-only layout still works underneath.
+// Single dark-glyph logo, always rendered on a fixed white chip in the
+// header (see renderEmailShell) so it stays legible in both light and dark
+// mode without depending on any client's dark-mode CSS support. Host it
+// somewhere public (Supabase Storage public bucket, or /public in your
+// app) and paste the URL here. Until it points to a real file the <img>
+// tag just shows a broken-image icon — the fallback text-only layout
+// still works underneath.
 const LOGO_LIGHT_URL = `${APP_URL}/email-assets/logo-light-mode.png`;
-const LOGO_DARK_URL = `${APP_URL}/email-assets/logo-dark-mode.png`;
 
 let _vapidReady = false;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -345,6 +353,53 @@ function shortId(id: string): string {
   return id ? id.slice(0, 8).toUpperCase() : '—';
 }
 
+// journal_signals.order_type is free-ish text set by the publish/edit form
+// ('market', 'limit', 'stop', 'buy_limit', 'sell_stop', ...). Recipients
+// need to know at a glance whether a signal already filled at the market
+// or is a pending order still waiting to trigger — that distinction was
+// missing from every "New Signal" / "Signal Updated" email entirely.
+const ORDER_TYPE_LABEL: Record<string, string> = {
+  market: 'Market Execution',
+  limit: 'Pending Order (Limit)',
+  stop: 'Pending Order (Stop)',
+  buy_limit: 'Pending Order (Buy Limit)',
+  sell_limit: 'Pending Order (Sell Limit)',
+  buy_stop: 'Pending Order (Buy Stop)',
+  sell_stop: 'Pending Order (Sell Stop)'
+};
+
+function formatOrderType(orderType: string | null | undefined): string {
+  if (!orderType) return '—';
+  const key = orderType.toLowerCase().trim();
+  if (ORDER_TYPE_LABEL[key]) return ORDER_TYPE_LABEL[key];
+  // Unknown/future value slipped in — prettify rather than hide it
+  // ('buy_stop_limit' -> 'Buy Stop Limit') instead of showing raw snake_case.
+  return key.split(/[_\s]+/).filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+// Human labels for the "what changed" summary on 'edited' emails. Keyed by
+// the same journal_signals column names the client would diff against.
+const FIELD_LABEL: Record<string, string> = {
+  order_type: 'order type', direction: 'direction', pair: 'pair',
+  market: 'market', entry: 'entry price', stop_loss: 'stop loss',
+  tp1: 'take profit 1', tp2: 'take profit 2', risk_reward: 'risk/reward',
+  risk_percent: 'risk %', confidence: 'confidence', session: 'session'
+};
+
+// Turns ['order_type','entry'] into "order type and entry price" so the
+// edited-signal email can say exactly what changed instead of a blanket
+// "signal details updated" that leaves the recipient to spot the diff
+// themselves against the previous email.
+function describeChangedFields(fields: string[] | undefined | null): string | null {
+  if (!fields || !fields.length) return null;
+  const labels = Array.from(new Set(fields.map((f) => FIELD_LABEL[f] || f.replace(/_/g, ' ')).filter(Boolean)));
+  if (!labels.length) return null;
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]}`;
+}
+
 // ──────────────────────────────────────────────────────────────
 // 4. PERSONALIZATION
 // ──────────────────────────────────────────────────────────────
@@ -401,7 +456,8 @@ interface KindTheme {
 const KIND_THEME: Record<EmailKind, KindTheme> = {
   published: {
     label: 'New Signal', accent: '#2563eb', accentBg: '#eff6ff', accentDark: '#60a5fa', accentBgDark: '#1e293b',
-    subjectEmoji: '', headline: (s) => `New ${s.direction === 'buy' ? 'Buy' : 'Sell'} Signal`
+    subjectEmoji: '',
+    headline: (s) => `New ${s.direction === 'buy' ? 'Buy' : 'Sell'} Signal — ${formatOrderType(s.order_type)}`
   },
   edited: {
     label: 'Signal Updated', accent: '#7c3aed', accentBg: '#f5f3ff', accentDark: '#a78bfa', accentBgDark: '#241e35',
@@ -546,8 +602,17 @@ function preheader(text: string): string {
 }
 
 function buildCalloutForKind(ctx: EmailContext): string | null {
-  const { kind, signal } = ctx;
+  const { kind, signal, changedFields } = ctx;
   switch (kind) {
+    case 'edited': {
+      const changedDesc = describeChangedFields(changedFields);
+      return calloutBox(
+        changedDesc
+          ? `Updated: <strong>${escapeHtml(changedDesc)}</strong>. Anything not listed here is unchanged.`
+          : 'This signal was edited. Review the updated details below.',
+        'neutral'
+      );
+    }
     case 'entry_triggered':
       return calloutBox(`Price reached the entry level and the order was filled at <strong>${escapeHtml(formatPrice(signal.entry))}</strong>. This trade is now live.`, 'neutral');
     case 'tp1_hit':
@@ -574,6 +639,7 @@ function buildCalloutForKind(ctx: EmailContext): string | null {
 
 function buildSummaryCard(signal: SignalRow, timezone: string): string {
   const rows = [
+    statRow('Order Type', formatOrderType(signal.order_type)),
     statRow('Entry', formatPrice(signal.entry)),
     statRow('Stop Loss', formatPrice(signal.stop_loss), '#dc2626'),
     statRow('Take Profit 1', formatPrice(signal.tp1), '#059669'),
@@ -611,7 +677,6 @@ function buildSummaryCard(signal: SignalRow, timezone: string): string {
 function staticDarkModeCss(theme: KindTheme): string {
   return `
 <style>
-  .logo-dark { display: none; }
   @media (prefers-color-scheme: dark) {
     .bg-page { background: #0b0e14 !important; }
     .bg-card { background: #12151d !important; border-color: #232733 !important; }
@@ -621,8 +686,6 @@ function staticDarkModeCss(theme: KindTheme): string {
     .border-t { border-color: #232733 !important; }
     .badge { background: #1e293b !important; color: #93c5fd !important; }
     .kind-badge { background: ${theme.accentBgDark} !important; color: ${theme.accentDark} !important; }
-    .logo-light { display: none !important; }
-    .logo-dark { display: inline-block !important; }
   }
   [data-ogsc] .bg-page { background: #0b0e14 !important; }
   [data-ogsc] .bg-card { background: #12151d !important; border-color: #232733 !important; }
@@ -632,8 +695,6 @@ function staticDarkModeCss(theme: KindTheme): string {
   [data-ogsc] .border-t { border-color: #232733 !important; }
   [data-ogsc] .badge { background: #1e293b !important; color: #93c5fd !important; }
   [data-ogsc] .kind-badge { background: ${theme.accentBgDark} !important; color: ${theme.accentDark} !important; }
-  [data-ogsc] .logo-light { display: none !important; }
-  [data-ogsc] .logo-dark { display: inline-block !important; }
 </style>`;
 }
 
@@ -658,9 +719,27 @@ ${preheader(preheaderText)}
         <tr><td class="border-t" style="padding:20px 28px;border-bottom:1px solid #e5e7eb;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
             <td align="left">
-              <img src="${LOGO_LIGHT_URL}" width="128" alt="NxTGen Trading Journal" class="logo-light" style="display:inline-block;height:auto;max-width:128px;border:0;outline:none;vertical-align:middle;">
-              <img src="${LOGO_DARK_URL}" width="128" alt="NxTGen Trading Journal" class="logo-dark" style="display:none;height:auto;max-width:128px;border:0;outline:none;vertical-align:middle;">
-              <div class="text-muted" style="margin-top:3px;color:#9ca3af;font-size:11px;font-weight:600;letter-spacing:0.3px;text-transform:uppercase;">Professional Trading Signals</div>
+              <!--
+                Logo lockup: fixed white chip behind the dark-glyph mark,
+                shown identically in light and dark mode — no swap.
+                The old approach tried to swap in a light-glyph PNG on dark
+                backgrounds via @media (prefers-color-scheme: dark), but
+                that swap depends on the mail client actually honouring
+                that media query. A lot of mobile mail apps (Gmail's apps
+                chief among them) render <style> blocks inconsistently, so
+                the swap silently never fired and the dark-glyph PNG kept
+                showing straight on the app's own dark background — same
+                black logo in both modes, exactly the bug being reported.
+                Pinning a permanent light chip behind the mark removes that
+                dependency entirely: the logo's visibility no longer relies
+                on which client this happens to be rendered in.
+              -->
+              <table role="presentation" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;">
+                <tr><td style="padding:6px 10px;">
+                  <img src="${LOGO_LIGHT_URL}" width="128" alt="NxTGen Trading Journal" style="display:inline-block;height:auto;max-width:128px;border:0;outline:none;vertical-align:middle;">
+                </td></tr>
+              </table>
+              <div class="text-muted" style="margin-top:6px;color:#9ca3af;font-size:11px;font-weight:600;letter-spacing:0.3px;text-transform:uppercase;">Professional Trading Signals</div>
             </td>
           </tr></table>
         </td></tr>
@@ -760,6 +839,7 @@ function buildPlainText(ctx: EmailContext, subject: string, viewUrl: string, set
     `${greeting} ${message || ''}`.trim(),
     '',
     `${signal.pair} — ${signal.direction.toUpperCase()}`,
+    `Order Type: ${formatOrderType(signal.order_type)}`,
     `Entry: ${formatPrice(signal.entry)}`,
     `Stop Loss: ${formatPrice(signal.stop_loss)}`,
     `Take Profit 1: ${formatPrice(signal.tp1)}`,
@@ -859,7 +939,12 @@ Deno.serve(async (req) => {
     // sends {signal_id, pair, direction, event_type, message}.
     const signal = (await fetchSignal(body.signal_id)) ?? signalFromPayload(body);
     const kind = resolveEmailKind(body.event_type, signal.status);
-    const fallbackMessage = body.message || '';
+    // When the client didn't pass an explicit message but did tell us which
+    // fields it changed (edits only), build "Updated: order type and entry
+    // price" so push/WhatsApp/email all say something more useful than a
+    // bare "signal update" when no custom message was supplied.
+    const changedFieldsDesc = kind === 'edited' ? describeChangedFields(body.changed_fields) : null;
+    const fallbackMessage = body.message || (changedFieldsDesc ? `Updated: ${changedFieldsDesc}` : '');
     const settingsUrl = `${APP_URL}/signals?notif-settings=1`;
 
     // Every user who has opted into at least one channel — these are the
@@ -911,7 +996,7 @@ Deno.serve(async (req) => {
         jobs.push((async () => {
           const recipientName = await resolveDisplayName(sb, s.owner_id, s.email);
           const timezone = resolveTimeZone(s.timezone);
-          const rendered = renderEmail({ kind, signal, message: fallbackMessage, recipientName, timezone });
+          const rendered = renderEmail({ kind, signal, message: fallbackMessage, recipientName, timezone, changedFields: body.changed_fields });
           await sendEmailViaResend(s.email as string, rendered, settingsUrl);
         })());
       }
