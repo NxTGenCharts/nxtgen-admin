@@ -89,6 +89,7 @@ interface SignalRow {
   tp1_hit_at: string | null;
   tp2_hit_at: string | null;
   auto_monitor_enabled: boolean;
+  risk_percent: number | null;
 }
 
 // ── 1. Symbol resolution ──────────────────────────────────────────
@@ -123,65 +124,7 @@ function symbolCacheKey(market: string, pair: string): string {
   return `${market}:${(pair || "").replace(/[\s_]/g, "").toUpperCase()}`;
 }
 
-// The exchange whose actual feed should drive triggers, per market —
-// same mapping used for the "recommended feed" in symbol-search, kept
-// consistent on purpose so what you picked in the New Signal dropdown
-// is the same feed the monitor watches.
-const PREFERRED_TV_EXCHANGE: Record<string, string> = {
-  forex: "FOREXCOM", commodities: "FOREXCOM", indices: "FOREXCOM",
-  crypto: "BINANCE",
-};
-function toTradingViewTicker(pair: string, market: string): string | null {
-  const exchange = PREFERRED_TV_EXCHANGE[market];
-  if (!exchange) return null; // stocks/synthetics — no single "recommended feed" to pin here
-  const clean = (pair || "").replace(/[\s_]/g, "").toUpperCase();
-  if (!clean) return null;
-  return `${exchange}:${clean}`;
-}
-
 // ── 2. Quote fetching (batched, cached) ───────────────────────────
-
-// PRIMARY source: TradingView's public (unofficial) scanner endpoint,
-// queried directly against FOREXCOM for forex/metals/indices and
-// Binance for crypto — i.e. the actual broker/exchange feed, not a
-// third-party aggregated rate. This is the same undocumented endpoint
-// class as symbol-search (see that function's own notes on the
-// tradeoff) — wrapped the same way: short timeout, never throws, and
-// silently yields to Twelve Data for anything it can't resolve.
-async function fetchTradingViewScannerPrices(tickers: string[]): Promise<Record<string, number>> {
-  if (!tickers.length) return {};
-  const out: Record<string, number> = {};
-  const CHUNK = 40;
-  for (let i = 0; i < tickers.length; i += CHUNK) {
-    const chunk = tickers.slice(i, i + CHUNK);
-    try {
-      const res = await fetch("https://scanner.tradingview.com/global/scan", {
-        method: "POST",
-        signal: AbortSignal.timeout(5000),
-        headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0", "Origin": "https://www.tradingview.com" },
-        body: JSON.stringify({ symbols: { tickers: chunk, query: { types: [] } }, columns: ["close"] }),
-      });
-      if (!res.ok) continue;
-      const json = await res.json();
-      const rows = Array.isArray(json?.data) ? json.data : [];
-      for (const row of rows) {
-        const sym = row?.s; // e.g. "FOREXCOM:EURUSD"
-        const price = Array.isArray(row?.d) ? parseFloat(row.d[0]) : NaN;
-        if (sym && !isNaN(price)) out[sym] = price;
-      }
-    } catch (e) {
-      // Expected occasionally — unofficial endpoint, no uptime guarantee.
-      console.error("tradingview scanner price fetch failed:", e);
-    }
-  }
-  return out;
-}
-
-// FALLBACK source: Twelve Data — official, always available, but an
-// aggregated/interbank-style rate rather than a specific broker's own
-// feed. Only used for symbols the scanner couldn't price this tick
-// (stocks, synthetics, or if TradingView's endpoint is having a bad
-// day) — see resolveQuotes() below for exactly how the two combine.
 async function fetchTwelveDataPrices(symbols: string[]): Promise<Record<string, number>> {
   if (!TWELVE_DATA_KEY || !symbols.length) return {};
   const out: Record<string, number> = {};
@@ -191,7 +134,7 @@ async function fetchTwelveDataPrices(symbols: string[]): Promise<Record<string, 
     const chunk = symbols.slice(i, i + CHUNK);
     const url = `https://api.twelvedata.com/price?symbol=${encodeURIComponent(chunk.join(","))}&apikey=${TWELVE_DATA_KEY}`;
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      const res = await fetch(url);
       const json = await res.json();
       if (chunk.length === 1) {
         const p = parseFloat(json?.price);
@@ -213,22 +156,12 @@ async function fetchTwelveDataPrices(symbols: string[]): Promise<Record<string, 
 // need, using the shared `market_quote_cache` table first so a burst
 // of signals on the same pair only costs one vendor call per tick,
 // and adjacent ticks within QUOTE_CACHE_TTL_MS cost zero.
-//
-// Source priority per symbol: TradingView@FOREXCOM/Binance first (the
-// feed you actually trade off), Twelve Data only for whatever that
-// didn't resolve. `monitor_source` on the signal row (set in
-// evaluateSignal) records exactly which one supplied the price that
-// tick, so this is always inspectable, not a black box.
 async function resolveQuotes(signals: SignalRow[]): Promise<Map<string, { price: number; source: string }>> {
-  const bySymbolKey = new Map<string, { market: string; pair: string; tvTicker: string | null; tdSymbol: string | null }>();
+  const bySymbolKey = new Map<string, { market: string; pair: string; vendorSymbol: string | null }>();
   for (const s of signals) {
     const key = symbolCacheKey(s.market, s.pair);
     if (!bySymbolKey.has(key)) {
-      bySymbolKey.set(key, {
-        market: s.market, pair: s.pair,
-        tvTicker: toTradingViewTicker(s.pair, s.market),
-        tdSymbol: toTwelveDataSymbol(s.pair, s.market),
-      });
+      bySymbolKey.set(key, { market: s.market, pair: s.pair, vendorSymbol: toTwelveDataSymbol(s.pair, s.market) });
     }
   }
 
@@ -257,50 +190,25 @@ async function resolveQuotes(signals: SignalRow[]): Promise<Map<string, { price:
 
   if (!keysToFetch.length) return result;
 
-  // Pass 1 — TradingView@FOREXCOM/Binance for every symbol that maps
-  // to one of those feeds.
-  const tvTickerByKey = new Map<string, string>();
+  // Batch-fetch everything not served from cache in one Twelve Data call.
+  const vendorSymbolByKey = new Map<string, string>();
   for (const key of keysToFetch) {
     const meta = bySymbolKey.get(key)!;
-    if (meta.tvTicker) tvTickerByKey.set(key, meta.tvTicker);
+    if (meta.vendorSymbol) vendorSymbolByKey.set(key, meta.vendorSymbol);
   }
-  const tvPrices = await fetchTradingViewScannerPrices(Array.from(new Set(tvTickerByKey.values())));
+  const vendorSymbols = Array.from(new Set(vendorSymbolByKey.values()));
+  const prices = await fetchTwelveDataPrices(vendorSymbols);
 
-  const stillNeeded: string[] = [];
   const upserts: { symbol_key: string; price: number; source: string; fetched_at: string }[] = [];
   const nowIso = new Date().toISOString();
-
   for (const key of keysToFetch) {
-    const ticker = tvTickerByKey.get(key);
-    const price = ticker ? tvPrices[ticker] : undefined;
-    if (price !== undefined) {
-      const source = `tradingview:${ticker!.split(":")[0].toLowerCase()}`; // e.g. "tradingview:forexcom"
-      result.set(key, { price, source });
-      upserts.push({ symbol_key: key, price, source, fetched_at: nowIso });
-    } else {
-      stillNeeded.push(key);
-    }
+    const vendorSymbol = vendorSymbolByKey.get(key);
+    if (!vendorSymbol) continue; // unsupported symbol (e.g. synthetics) — skip, don't crash
+    const price = prices[vendorSymbol];
+    if (price === undefined) continue; // vendor didn't return this one this tick
+    result.set(key, { price, source: "twelvedata" });
+    upserts.push({ symbol_key: key, price, source: "twelvedata", fetched_at: nowIso });
   }
-
-  // Pass 2 — Twelve Data fallback for anything Pass 1 didn't price
-  // (stocks/synthetics that have no TV ticker mapping at all, or a
-  // symbol the scanner just didn't return this tick).
-  if (stillNeeded.length) {
-    const tdSymbolByKey = new Map<string, string>();
-    for (const key of stillNeeded) {
-      const meta = bySymbolKey.get(key)!;
-      if (meta.tdSymbol) tdSymbolByKey.set(key, meta.tdSymbol);
-    }
-    const tdPrices = await fetchTwelveDataPrices(Array.from(new Set(tdSymbolByKey.values())));
-    for (const key of stillNeeded) {
-      const tdSymbol = tdSymbolByKey.get(key);
-      const price = tdSymbol ? tdPrices[tdSymbol] : undefined;
-      if (price === undefined) continue; // unresolved this tick — skip, don't crash, try again next minute
-      result.set(key, { price, source: "twelvedata" });
-      upserts.push({ symbol_key: key, price, source: "twelvedata", fetched_at: nowIso });
-    }
-  }
-
   if (upserts.length) {
     const { error } = await sb.from("market_quote_cache").upsert(upserts, { onConflict: "symbol_key" });
     if (error) console.error("quote cache write failed:", error.message);
@@ -349,6 +257,26 @@ function isBreakevenDue(s: SignalRow, price: number): boolean {
   if (s.breakeven_at) return false;
   const threshold = s.breakeven_rr && s.breakeven_rr > 0 ? s.breakeven_rr : 2;
   return currentRR(s, price) >= threshold;
+}
+
+// Mirrors the client's `_sigTradeMath` (js/signals.js) so an auto-detected
+// TP1/TP2/SL event is persisted with its REAL numbers instead of being left
+// null. Leaving these null is what let the admin's display fallback
+// (_sigEffectiveMath) guess using the trade's full planned risk:reward —
+// i.e. reporting a TP1-only win as if it had already reached TP2.
+function computeTradeMath(s: SignalRow, exitPrice: number): { pips: number; r_multiple: number; profit_percent: number } | null {
+  const entry = s.entry, sl = s.stop_loss;
+  if (!entry || !sl || entry === sl) return null;
+  const riskDist = Math.abs(entry - sl);
+  const dir = s.direction === "buy" ? 1 : -1;
+  const rewardDist = (exitPrice - entry) * dir;
+  const rMultiple = Math.round((rewardDist / riskDist) * 100) / 100;
+  const riskPct = s.risk_percent || 1;
+  const profitPercent = Math.round(rMultiple * riskPct * 100) / 100;
+  let pipMult = 1;
+  if (s.market === "forex") pipMult = /JPY/i.test(s.pair || "") ? 100 : 10000;
+  const pips = Math.round(rewardDist * pipMult * 10) / 10;
+  return { pips, r_multiple: rMultiple, profit_percent: profitPercent };
 }
 
 // ── 4. Notify (reuses the exact same fan-out used by manual updates) ──
@@ -454,8 +382,12 @@ async function evaluateSignal(s: SignalRow, price: number, source: string) {
 
   // ── TP2 hit → mark completed (terminal, matches the manual "Close" outcome) ──
   if (!s.tp2_hit_at && isTp2Hit(s, price)) {
+    const math = computeTradeMath(s, s.tp2 as number);
     const { data } = await sb.from("journal_signals")
-      .update({ status: "tp2_hit", tp2_hit_at: new Date().toISOString(), result: "win", closed_at: new Date().toISOString() })
+      .update({
+        status: "tp2_hit", tp2_hit_at: new Date().toISOString(), result: "win", closed_at: new Date().toISOString(),
+        ...(math ? { pips: math.pips, r_multiple: math.r_multiple, profit_percent: math.profit_percent } : {}),
+      })
       .eq("id", s.id).is("tp2_hit_at", null)
       .select("id");
     if (data && data.length) {
@@ -471,8 +403,16 @@ async function evaluateSignal(s: SignalRow, price: number, source: string) {
 
   // ── TP1 hit ──────────────────────────────────────────────────────
   if (!s.tp1_hit_at && isTp1Hit(s, price)) {
+    // Compute real numbers off the TP1 target itself (not the live tick
+    // price, which may have run slightly past it) — same convention the
+    // manual "Add Update" flow uses — so this is a true interim result,
+    // not the trade's full planned risk:reward.
+    const math = computeTradeMath(s, s.tp1 as number);
     const { data } = await sb.from("journal_signals")
-      .update({ status: "tp1_hit", tp1_hit_at: new Date().toISOString(), result: "win" })
+      .update({
+        status: "tp1_hit", tp1_hit_at: new Date().toISOString(), result: "win",
+        ...(math ? { pips: math.pips, r_multiple: math.r_multiple, profit_percent: math.profit_percent } : {}),
+      })
       .eq("id", s.id).is("tp1_hit_at", null)
       .select("id");
     if (data && data.length) {
@@ -482,6 +422,13 @@ async function evaluateSignal(s: SignalRow, price: number, source: string) {
         await logActivity(s.id, s.owner_id, note);
         await broadcast(s.id, s.pair, s.direction, "status_changed", `${s.pair}: ${note}`);
       }
+      // Keep the in-memory row in sync with what was just written — the
+      // breakeven check below reads `s.status`/`s.tp1_hit_at` and can
+      // fire in this same tick. Without this, it still sees the
+      // pre-update "active" status and downgrades it right back down,
+      // silently erasing the tp1_hit status this block just set.
+      s.status = "tp1_hit";
+      s.tp1_hit_at = new Date().toISOString();
     }
     // fall through — breakeven can still fire in the same tick if both conditions are already true
   }
@@ -511,7 +458,7 @@ Deno.serve(async (req) => {
   try {
     const { data: signals, error } = await sb
       .from("journal_signals")
-      .select("id, owner_id, pair, market, direction, order_type, entry, stop_loss, tp1, tp2, status, breakeven_rr, entered_at, breakeven_at, tp1_hit_at, tp2_hit_at, auto_monitor_enabled")
+      .select("id, owner_id, pair, market, direction, order_type, entry, stop_loss, tp1, tp2, status, breakeven_rr, entered_at, breakeven_at, tp1_hit_at, tp2_hit_at, auto_monitor_enabled, risk_percent")
       .eq("auto_monitor_enabled", true)
       .eq("archived", false)
       .eq("is_draft", false)
