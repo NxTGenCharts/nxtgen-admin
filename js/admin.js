@@ -192,6 +192,13 @@
     `;
   }
 
+  function _admResultBadge(s) {
+    if (s.result === 'win') return `<span class="sig-result-badge win">${icn('ic-check')}Win</span>`;
+    if (s.result === 'loss') return `<span class="sig-result-badge loss">${icn('ic-trend-down')}Loss</span>`;
+    if (s.result === 'breakeven') return `<span class="sig-result-badge breakeven">${icn('ic-scale')}Breakeven</span>`;
+    return `<span class="sig-result-badge pending">${icn('ic-clock')}Pending</span>`;
+  }
+
   function _admRender() {
     _admRenderStats();
     const root = document.getElementById('adm-table-root');
@@ -213,6 +220,7 @@
         <td>${_cap(s.market)}</td>
         <td>${s.direction ? `<span class="sig-dir-badge ${s.direction}">${s.direction === 'buy' ? '🟢 BUY' : '🔴 SELL'}</span>` : '—'}</td>
         <td><span class="sig-badge sig-badge-${s.status}"><span class="dot"></span>${_cap(s.status)}</span></td>
+        <td>${_admResultBadge(s)}</td>
         <td onclick="event.stopPropagation()">
           <select class="adm-select adm-inline-select" onchange="_admChangeVisibility('${s.id}', this.value)">
             <option value="public" ${s.visibility === 'public' ? 'selected' : ''}>Public</option>
@@ -236,7 +244,7 @@
         <table>
           <thead><tr>
             <th><input type="checkbox" id="adm-select-all" onchange="_admSelectAll(this.checked)"></th>
-            <th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Visibility</th><th>Archived</th><th>Created</th><th>Actions</th>
+            <th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Result</th><th>Visibility</th><th>Archived</th><th>Created</th><th>Actions</th>
           </tr></thead>
           <tbody>${body}</tbody>
         </table>
