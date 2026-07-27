@@ -27,7 +27,7 @@ create table if not exists journal_signals (
   -- Meta
   confidence        text check (confidence in ('low','medium','high','very_high')),
   confidence_score  int check (confidence_score between 0 and 100),
-  session           text check (session in ('sydney','tokyo','london','new_york','london_ny_overlap')),
+  session           text check (session in ('sydney','tokyo','london','new_york','london_ny_overlap')), -- superseded below: see "Consolidate session values"
   setup_type        text,
   status            text not null default 'waiting'
                       check (status in ('waiting','active','partial','tp1_hit','tp2_hit','tp3_hit','stopped_out','cancelled','expired')),
@@ -253,6 +253,20 @@ alter table journal_signals drop constraint if exists journal_signals_status_che
 alter table journal_signals add constraint journal_signals_status_check
   check (status in ('draft','scheduled','waiting','active','partial','breakeven',
                      'tp1_hit','tp2_hit','tp3_hit','stopped_out','cancelled','expired','archived'));
+
+-- Consolidate session values: Sydney/Tokyo folded into 'asian', and the
+-- London/NY Overlap session retired (see SESSIONS in signals.js). The
+-- original create-table constraint above still lists the old values —
+-- left as-is for history, superseded here so a fresh install ends up with
+-- the same constraint the live DB was patched to after this shipped
+-- without it, which made every "Asian" session signal fail to save with
+-- `violates check constraint "journal_signals_session_check"`.
+alter table journal_signals drop constraint if exists journal_signals_session_check;
+alter table journal_signals add constraint journal_signals_session_check
+  check (session is null or session in ('asian','london','new_york'));
+
+update journal_signals set session = 'asian' where session in ('sydney','tokyo');
+update journal_signals set session = null where session = 'london_ny_overlap';
 
 create index if not exists idx_signals_archived on journal_signals(archived);
 create index if not exists idx_signals_is_draft on journal_signals(is_draft);
