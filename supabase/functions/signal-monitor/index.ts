@@ -363,12 +363,25 @@ async function evaluateSignal(s: SignalRow, price: number, source: string) {
 
   // ── Stop Loss hit (checked first — most protective) ─────────────
   if (isSlHit(s, price)) {
+    // Once SL has been moved to breakeven, getting stopped there is a
+    // scratch, not a loss — the note text already said "closed flat" in
+    // that case, but `result` was hardcoded to "loss" regardless, which
+    // is what made a breakeven scratch show up as a losing trade. The
+    // exit price used for the math is the *effective* stop itself
+    // (entry, once at breakeven) rather than the live tick price, same
+    // convention as the TP1/TP2 math above.
+    const isBreakevenStop = !!s.breakeven_at;
+    const outcomeResult = isBreakevenStop ? "breakeven" : "loss";
+    const math = computeTradeMath(s, effectiveStop(s));
     const { data } = await sb.from("journal_signals")
-      .update({ status: "stopped_out", result: "loss", closed_at: new Date().toISOString() })
+      .update({
+        status: "stopped_out", result: outcomeResult, closed_at: new Date().toISOString(),
+        ...(math ? { pips: math.pips, r_multiple: math.r_multiple, profit_percent: math.profit_percent } : {}),
+      })
       .eq("id", s.id).in("status", OPEN_STATUSES)
       .select("id");
     if (data && data.length) {
-      const note = s.breakeven_at
+      const note = isBreakevenStop
         ? `🔒 Stop hit at breakeven (${price}) — closed flat.`
         : `🛑 Stop loss hit at ${price}.`;
       const wrote = await logAutoUpdate(s.id, "stopped_out", "sl_hit", note, price);
