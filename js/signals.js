@@ -31,6 +31,16 @@
     forex: 'Forex', crypto: 'Crypto', indices: 'Indices',
     commodities: 'Commodities', stocks: 'Stocks', synthetic: 'Synthetic Indices'
   };
+  // Standard trade-management policy — shown on every signal by default.
+  // This is a fixed house rule, not something set per-signal, so it's
+  // rendered directly rather than pulled from a stored field.
+  const MANAGEMENT_RULES_HTML = `
+    <p style="margin:0 0 8px">Once a trade reaches 2R, all users are expected to manage their positions by either:</p>
+    <ul style="margin:0 0 8px;padding-left:18px">
+      <li>Moving Stop Loss to Breakeven (BE) or Take Partials and holding the remaining position towards the full Take Profit (TP), or</li>
+      <li>Closing the trade at 2R and securing the profit.</li>
+    </ul>
+    <p style="margin:0">Trade management remains the responsibility of each user. Always manage risk according to your personal trading plan, account size and risk tolerance.</p>`;
   const STATUS_LABEL = {
     draft: 'Draft', scheduled: 'Scheduled',
     // Only Cancelled and Closed are terminal — every other stage is still
@@ -39,6 +49,19 @@
     tp1_hit: 'Ongoing', tp2_hit: 'Ongoing',
     stopped_out: 'Closed', cancelled: 'Cancelled', expired: 'Expired', closed: 'Closed'
   };
+  // A "Closed" status pill is a dead end either way — but it shouldn't *look*
+  // like one when the signal actually won. Tint the pill (and its dot) by
+  // the outcome: green for a win, red for a loss, gold for a breakeven —
+  // matching the same tones already used for the row accent bar / result
+  // badge — instead of the flat neutral "Closed" look for every outcome.
+  function _sigStatusBadgeClass(s) {
+    if (s.status === 'closed' || s.status === 'stopped_out') {
+      if (s.result === 'win') return 'sig-badge-closed-win';
+      if (s.result === 'loss') return 'sig-badge-closed-loss';
+      if (s.result === 'breakeven') return 'sig-badge-closed-breakeven';
+    }
+    return 'sig-badge-' + s.status;
+  }
   const CONF_LABEL = { low: 'Low', medium: 'Medium', high: 'High', very_high: 'Very High' };
   const TIMELINE_STEPS = ['waiting', 'active', 'tp1_hit', 'tp2_hit', 'closed'];
   // Only Cancelled and Closed take a signal out of "Ongoing" — every other
@@ -616,6 +639,9 @@
       </div>
     </div>
 
+    <div id="sig-health-hero-host"></div>
+    <div id="sig-insights-host"></div>
+
     <div id="sig-kpi-wrap">
       <div class="sig-stats-grid" id="sig-stats-grid"></div>
     </div>
@@ -635,8 +661,6 @@
     </div>
 
     <div id="sig-view-root"></div>
-
-    ${_sigIsAdmin() ? `<button id="sig-fab-new" onclick="_sigOpenModal()">${icn('ic-plus')}</button>` : ''}
     `;
   }
 
@@ -1208,10 +1232,18 @@
   function _sigUpdateKpiVisibility() {
     const wrap = document.getElementById('sig-kpi-wrap');
     const btn = document.getElementById('sig-kpi-expand-btn');
+    const heroHost = document.getElementById('sig-health-hero-host');
+    const insightsHost = document.getElementById('sig-insights-host');
     if (!wrap || !btn) return;
     const onDrafts = _sigView === 'drafts';
+    const onAnalytics = _sigView === 'analytics';
     const collapsed = onDrafts && !_sigKpiExpandedOnDrafts;
     wrap.style.display = collapsed ? 'none' : '';
+    // Health score + insights are an Analytics-tab feature only — they
+    // don't belong on Table/Cards/Calendar/Drafts, which stay focused
+    // on the raw signal list.
+    if (heroHost) heroHost.style.display = onAnalytics ? '' : 'none';
+    if (insightsHost) insightsHost.style.display = onAnalytics ? '' : 'none';
     btn.style.display = onDrafts ? 'inline-flex' : 'none';
     btn.innerHTML = `${icn(_sigKpiExpandedOnDrafts ? 'ic-minus' : 'ic-chart-bar')} ${_sigKpiExpandedOnDrafts ? 'Hide' : 'Show'} performance stats`;
   }
@@ -1452,9 +1484,17 @@
   }
 
   // ── Hero widget card shells ─────────────────────────────────────
-  function _sigWidgetShell(id, cls, label, icon, tone, valueHtml, bodyHtml) {
+  // `metricKey` (optional) wires the card up as a drill-down entry point
+  // into AnalyticsDetailDrawer — pass one of the SIG_ANA_META keys below
+  // to make a card clickable (mouse + keyboard) and open the matching
+  // detail drawer. Cards without a metricKey render exactly as before.
+  function _sigWidgetShell(id, cls, label, icon, tone, valueHtml, bodyHtml, metricKey) {
+    const clickable = !!metricKey;
     return `
-    <div class="sig-widget ${cls || ''}">
+    <div class="sig-widget ${cls || ''} ${clickable ? 'sig-widget-clickable' : ''}" id="${id}"
+      ${clickable ? `role="button" tabindex="0" aria-label="View ${label} details"
+        onclick="_sigOpenAnalyticsDrawer('${metricKey}')"
+        onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();_sigOpenAnalyticsDrawer('${metricKey}')}"` : ''}>
       <div class="sig-stat-top">
         <span class="sig-stat-label">${label}</span>
         <span class="sig-stat-icon ${tone}">${icn(icon)}</span>
@@ -1464,29 +1504,201 @@
     </div>`;
   }
 
+  // ── Signal Health Score (hero gauge) ─────────────────────────────
+  // Blends six existing metrics into one 0-100 score so the whole
+  // dashboard has a single at-a-glance "how am I doing" number, the
+  // way a health/readiness score works on a fitness tracker.
+  function _sigHealthScore(m) {
+    const clamp = (n) => Math.max(0, Math.min(100, n));
+    const winScore = clamp(m.winPct);
+    const rrScore = clamp((m.avgRR / 3) * 100);
+    const confScore = clamp(m.avgConf);
+    const completionScore = clamp(m.completionRate);
+    const accuracyScore = clamp(m.entryAccuracy);
+    const riskScore = clamp(100 - (m.avgRiskPct || 0) * 25);
+
+    const factors = [
+      { label: 'Win Rate', pct: winScore, display: `${m.winPct.toFixed(0)}%` },
+      { label: 'Risk:Reward', pct: rrScore, display: `1:${m.avgRR.toFixed(1)}` },
+      { label: 'Confidence', pct: confScore, display: `${m.avgConf.toFixed(0)}%` },
+      { label: 'Completion', pct: completionScore, display: `${m.completionRate.toFixed(0)}%` },
+      { label: 'Entry Accuracy', pct: accuracyScore, display: `${m.entryAccuracy.toFixed(0)}%` },
+      { label: 'Risk Control', pct: riskScore, display: `${(m.avgRiskPct || 0).toFixed(2)}%` },
+    ];
+
+    const score = clamp(
+      winScore * 0.25 + rrScore * 0.20 + confScore * 0.15 +
+      completionScore * 0.15 + accuracyScore * 0.15 + riskScore * 0.10
+    );
+
+    let label, tone;
+    if (score >= 85) { label = 'Excellent'; tone = 'green'; }
+    else if (score >= 70) { label = 'Good'; tone = 'teal'; }
+    else if (score >= 50) { label = 'Fair'; tone = 'gold'; }
+    else { label = 'Needs Attention'; tone = 'red'; }
+
+    return { score, label, tone, factors };
+  }
+
+  function _sigHealthGaugeSvg(score, tone) {
+    const r = 52, c = 2 * Math.PI * r;
+    const pct = Math.max(0, Math.min(100, score));
+    const offset = c * (1 - pct / 100);
+    const toneVar = { green: 'var(--green)', teal: 'var(--teal)', gold: 'var(--gold)', red: 'var(--red)' }[tone] || 'var(--blue)';
+    return `<svg class="sig-health-gauge-svg" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="${r}" fill="none" stroke="var(--glass-border-h)" stroke-width="10"/>
+      <circle class="sig-health-gauge-arc" cx="60" cy="60" r="${r}" fill="none" stroke="${toneVar}" stroke-width="10"
+        stroke-linecap="round" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${c.toFixed(1)}"
+        data-final-offset="${offset.toFixed(1)}" transform="rotate(-90 60 60)"/>
+    </svg>`;
+  }
+
+  function _sigRenderHealthHero(m) {
+    const host = document.getElementById('sig-health-hero-host');
+    if (!host) return;
+    const h = _sigHealthScore(m);
+    host.innerHTML = `
+      <div class="sig-health-hero">
+        <div class="sig-health-gauge-wrap">
+          ${_sigHealthGaugeSvg(h.score, h.tone)}
+          <div class="sig-health-gauge-center">
+            <span class="sig-health-score-num ${h.tone}"><span class="sig-counting" data-target="${h.score.toFixed(0)}">0</span>%</span>
+            <span class="sig-health-score-label ${h.tone}">${h.label}</span>
+          </div>
+        </div>
+        <div class="sig-health-body">
+          <div class="sig-health-title-row">
+            <span class="sig-health-title">Overall Signal Health</span>
+            <span class="sig-health-sub">Blended from win rate, RR, confidence, completion, accuracy &amp; risk control</span>
+          </div>
+          <div class="sig-health-factors">
+            ${h.factors.map(f => _sigMiniBar(f.label, f.display, f.pct,
+              f.pct >= 70 ? 'green' : f.pct >= 45 ? 'gold' : 'red')).join('')}
+          </div>
+        </div>
+      </div>`;
+    // Animate the arc in on next frame so the transition actually fires.
+    requestAnimationFrame(() => {
+      const arc = host.querySelector('.sig-health-gauge-arc');
+      if (arc) arc.style.strokeDashoffset = arc.dataset.finalOffset;
+    });
+  }
+
+  // ── Signal Insights (auto-generated observations) ───────────────
+  // Reads the same _sigComputeMetrics() output every other card uses —
+  // no separate data source, no AI call — and turns it into a short
+  // list of plain-English observations. Pure function of current data,
+  // so it never says anything the numbers on screen don't back up.
+  function _sigGenerateInsights(m) {
+    const out = [];
+    const closed = m.closed;
+
+    if (m.bestSession !== '—' && closed.length >= 2) {
+      out.push({ tone: 'up', text: `${SESSION_LABEL[m.bestSession] || m.bestSession} session has the highest win rate at ${(m.bestSessionRate * 100).toFixed(0)}%.` });
+    }
+    if (m.bestPair !== '—' && closed.length >= 2) {
+      out.push({ tone: 'up', text: `${m.bestPair} is your best-performing pair at ${(m.bestRate * 100).toFixed(0)}% win rate.` });
+    }
+    if (m.winsDelta > 0) {
+      out.push({ tone: 'up', text: `Winning signals are up ${m.winsDelta} versus last week.` });
+    } else if (m.winsDelta < 0) {
+      out.push({ tone: 'down', text: `Winning signals are down ${Math.abs(m.winsDelta)} versus last week.` });
+    }
+    if (m.lossesDelta < 0) {
+      out.push({ tone: 'up', text: `Losing signals fell by ${Math.abs(m.lossesDelta)} compared to last week.` });
+    } else if (m.lossesDelta > 0) {
+      out.push({ tone: 'down', text: `Losing signals rose by ${m.lossesDelta} compared to last week.` });
+    }
+    if (closed.length >= 3) {
+      if (m.tpHitPct > m.slHitPct) {
+        out.push({ tone: 'up', text: `TP hit rate (${m.tpHitPct.toFixed(0)}%) is outperforming SL hit rate (${m.slHitPct.toFixed(0)}%).` });
+      } else if (m.slHitPct > m.tpHitPct) {
+        out.push({ tone: 'down', text: `SL hit rate (${m.slHitPct.toFixed(0)}%) currently exceeds TP hit rate (${m.tpHitPct.toFixed(0)}%).` });
+      }
+    }
+    if (m.avgConf > 0) {
+      out.push({ tone: m.avgConf >= 70 ? 'up' : 'neutral', text: `Average confidence score is ${m.avgConf.toFixed(0)}%${m.highConf ? ` (${m.highConf} high-confidence signal${m.highConf === 1 ? '' : 's'})` : ''}.` });
+    }
+    if (m.expiredCt === 0 && m.all.length > 0) {
+      out.push({ tone: 'up', text: 'No expired signals — clean execution discipline.' });
+    } else if (m.expiredCt > 0) {
+      out.push({ tone: 'down', text: `${m.expiredCt} signal${m.expiredCt === 1 ? '' : 's'} expired unfilled — consider tightening entry windows.` });
+    }
+    if (m.pending > 0) {
+      out.push({ tone: 'neutral', text: `${m.pending} signal${m.pending === 1 ? '' : 's'} still pending trigger.` });
+    }
+    if (m.breakevens > 0) {
+      out.push({ tone: 'neutral', text: `${m.breakevens} signal${m.breakevens === 1 ? '' : 's'} closed at breakeven this period.` });
+    }
+    const marketEntries = Object.entries(m.byMarket).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+    if (marketEntries.length) {
+      const [topMarket, topCount] = marketEntries[0];
+      const total = marketEntries.reduce((a, [, v]) => a + v, 0);
+      out.push({ tone: 'neutral', text: `${MARKET_LABEL[topMarket] || topMarket} makes up ${(topCount / total * 100).toFixed(0)}% of your signals.` });
+    }
+    return out;
+  }
+
+  function _sigInsightIcon(tone) {
+    if (tone === 'up') return icn('ic-trend-up');
+    if (tone === 'down') return icn('ic-trend-down');
+    return icn('ic-info');
+  }
+
+  function _sigRenderInsights(m) {
+    const host = document.getElementById('sig-insights-host');
+    if (!host) return;
+    const insights = _sigGenerateInsights(m);
+    if (!insights.length) {
+      host.innerHTML = `
+        <div class="sig-insights-panel">
+          <div class="sig-insights-head"><span class="sig-stat-icon purple">${icn('ic-zap')}</span><span class="sig-insights-title">Signal Insights</span></div>
+          <div class="sig-insights-empty">Publish and close a few signals — insights will appear here automatically.</div>
+        </div>`;
+      return;
+    }
+    host.innerHTML = `
+      <div class="sig-insights-panel">
+        <div class="sig-insights-head"><span class="sig-stat-icon purple">${icn('ic-zap')}</span><span class="sig-insights-title">Signal Insights</span></div>
+        <ul class="sig-insights-list">
+          ${insights.slice(0, 8).map((ins, i) => `
+            <li class="sig-insight-row ${ins.tone}" style="animation-delay:${(i * 0.04).toFixed(2)}s">
+              <span class="sig-insight-icon ${ins.tone}">${_sigInsightIcon(ins.tone)}</span>
+              <span class="sig-insight-text">${ins.text}</span>
+            </li>`).join('')}
+        </ul>
+      </div>`;
+  }
+
   function _sigRenderStats() {
     const grid = document.getElementById('sig-stats-grid');
     if (!grid) return;
     const m = _sigComputeMetrics();
     const hasApex = typeof pf3Mount === 'function' && typeof ApexCharts !== 'undefined';
+    _sigRenderHealthHero(m);
+    _sigRenderInsights(m);
 
     grid.innerHTML = [
       // 1 — Active Signals: pulse + trend spark
       _sigWidgetShell('sig-w-active', '', 'Active Signals', 'ic-activity', 'blue',
         `<span class="sig-live-dot"></span><span class="sig-counting" data-target="${m.active.length}">${m.active.length}</span>`,
-        `<div id="sig-w-active-spark" class="sig-widget-apex"></div><div class="sig-widget-foot">${m.thisWeek.length} this week</div>`),
+        `<div id="sig-w-active-spark" class="sig-widget-apex"></div><div class="sig-widget-foot">${m.thisWeek.length} this week</div>`,
+        'active'),
       // 2 — Winning Signals: ring + weekly delta
       _sigWidgetShell('sig-w-win', 'sig-widget-ring-card', 'Winning Signals', 'ic-trend-up', 'green',
         `<span class="sig-counting" data-target="${m.wins.length}">${m.wins.length}</span>`,
-        `<div class="sig-widget-ring-row"><div id="sig-w-win-ring" class="sig-widget-ring"></div><div class="sig-widget-ring-meta"><span class="big">${m.winPct.toFixed(0)}%</span><span class="delta ${m.winsDelta >= 0 ? 'up' : 'down'}">${m.winsDelta >= 0 ? '▲' : '▼'} ${Math.abs(m.winsDelta)} wk</span></div></div>`),
+        `<div class="sig-widget-ring-row"><div id="sig-w-win-ring" class="sig-widget-ring"></div><div class="sig-widget-ring-meta"><span class="big">${m.winPct.toFixed(0)}%</span><span class="delta ${m.winsDelta >= 0 ? 'up' : 'down'}">${m.winsDelta >= 0 ? '▲' : '▼'} ${Math.abs(m.winsDelta)} wk</span></div></div>`,
+        'wins'),
       // 3 — Losing Signals: bar + weekly comparison
       _sigWidgetShell('sig-w-loss', '', 'Losing Signals', 'ic-trend-down', 'red',
         `<span class="sig-counting" data-target="${m.losses.length}">${m.losses.length}</span>`,
-        `<div id="sig-w-loss-spark" class="sig-widget-apex"></div><div class="sig-widget-foot">${m.lossPct.toFixed(0)}% of closed · <span class="${m.lossesDelta <= 0 ? 'sig-pips-pos' : 'sig-pips-neg'}">${m.lossesDelta >= 0 ? '+' : ''}${m.lossesDelta} wk</span></div>`),
+        `<div id="sig-w-loss-spark" class="sig-widget-apex"></div><div class="sig-widget-foot">${m.lossPct.toFixed(0)}% of closed · <span class="${m.lossesDelta <= 0 ? 'sig-pips-pos' : 'sig-pips-neg'}">${m.lossesDelta >= 0 ? '+' : ''}${m.lossesDelta} wk</span></div>`,
+        'losses'),
       // 4 — Today's Signals: hourly activity
       _sigWidgetShell('sig-w-today', '', "Today's Signals", 'ic-calendar', 'purple',
         `<span class="sig-counting" data-target="${m.todays.length}">${m.todays.length}</span>`,
-        `<div id="sig-w-today-spark" class="sig-widget-apex"></div><div class="sig-widget-foot">Hourly activity</div>`),
+        `<div id="sig-w-today-spark" class="sig-widget-apex"></div><div class="sig-widget-foot">Hourly activity</div>`,
+        'today'),
       // 5 — Weekly Accuracy: circular progress
       _sigWidgetShell('sig-w-acc', 'sig-widget-ring-card', 'Weekly Accuracy', 'ic-target', m.weekAcc >= 50 ? 'green' : 'red',
         `<span class="sig-counting" data-target="${m.weekAcc.toFixed(0)}">${m.weekAcc.toFixed(0)}</span>%`,
@@ -1502,20 +1714,24 @@
       // 8 — Total Pips: trend graph
       _sigWidgetShell('sig-w-pips', '', 'Total Pips', 'ic-zap', m.totalPips >= 0 ? 'green' : 'red',
         `${m.totalPips >= 0 ? '+' : ''}<span class="sig-counting" data-target="${m.totalPips.toFixed(0)}">${m.totalPips.toFixed(0)}</span>`,
-        `<div id="sig-w-pips-spark" class="sig-widget-apex"></div>`),
+        `<div id="sig-w-pips-spark" class="sig-widget-apex"></div>`,
+        'pips'),
       // 9 — Total R: progress gauge
       _sigWidgetShell('sig-w-totalr', 'sig-widget-ring-card', 'Total R', 'ic-scale', m.totalR >= 0 ? 'green' : 'red',
         `${m.totalR >= 0 ? '+' : ''}<span class="sig-counting" data-target="${m.totalR.toFixed(1)}">${m.totalR.toFixed(1)}</span>R`,
-        `<div id="sig-w-totalr-ring" class="sig-widget-ring sig-widget-ring-solo"></div>`),
+        `<div id="sig-w-totalr-ring" class="sig-widget-ring sig-widget-ring-solo"></div>`,
+        'totalr'),
       // 10 — Breakevens: signals that reached (or closed at) breakeven.
       // Replaces Open Positions, which just duplicated Active Signals.
       _sigWidgetShell('sig-w-breakeven', '', 'Breakevens', 'ic-scale', 'gold',
         `<span class="sig-counting" data-target="${m.breakevens}">${m.breakevens}</span>`,
-        `<div class="sig-widget-foot">${m.breakevens ? `${(m.all.length ? (m.breakevens / m.all.length * 100) : 0).toFixed(0)}% of all signals` : 'None yet'}</div>`),
+        `<div class="sig-widget-foot">${m.breakevens ? `${(m.all.length ? (m.breakevens / m.all.length * 100) : 0).toFixed(0)}% of all signals` : 'None yet'}</div>`,
+        'breakeven'),
       // 11 — Closed Positions: completion ring
       _sigWidgetShell('sig-w-closed', 'sig-widget-ring-card', 'Closed Positions', 'ic-folder', 'purple',
         `<span class="sig-counting" data-target="${m.closedPositions}">${m.closedPositions}</span>`,
-        `<div class="sig-widget-ring-row"><div id="sig-w-closed-ring" class="sig-widget-ring"></div><div class="sig-widget-ring-meta"><span class="big">${m.completionRate.toFixed(0)}%</span><span class="lbl">complete</span></div></div>`),
+        `<div class="sig-widget-ring-row"><div id="sig-w-closed-ring" class="sig-widget-ring"></div><div class="sig-widget-ring-meta"><span class="big">${m.completionRate.toFixed(0)}%</span><span class="lbl">complete</span></div></div>`,
+        'closed'),
       // 12 — Monthly Profit: animated profit curve
       _sigWidgetShell('sig-w-profit', '', 'Monthly Profit', 'ic-trophy', m.monthProfit >= 0 ? 'green' : 'red',
         `${m.monthProfit >= 0 ? '+' : ''}<span class="sig-counting" data-target="${m.monthProfit.toFixed(1)}">${m.monthProfit.toFixed(1)}</span>%`,
@@ -1627,6 +1843,470 @@
   }
 
   // ══════════════════════════════════════════════════════════════
+  // ANALYTICS DETAIL DRAWER — reusable drill-down panel. Every hero
+  // widget above that's been wired with a metricKey (see _sigWidgetShell)
+  // opens this same right-side drawer, populated with the actual signals
+  // behind that metric rather than just the number. Nothing here
+  // duplicates the signals dataset — every list is filtered fresh from
+  // _sigAll / _sigComputeMetrics() each time the drawer (re)renders.
+  // ══════════════════════════════════════════════════════════════
+  const SIG_ANA_BATCH = 30;
+  let _sigAnaState = { type: null, search: '', sort: 'date_desc', range: 'all', limit: SIG_ANA_BATCH };
+  let _sigAnaLoadTimer = null;
+
+  const SIG_ANA_META = {
+    active: { title: 'Active Signals', icon: 'ic-activity', tone: 'blue', metricLabel: 'Planned RR', hasRange: false },
+    wins: { title: 'Winning Signals', icon: 'ic-trend-up', tone: 'green', metricLabel: 'Pips', hasRange: true },
+    losses: { title: 'Losing Signals', icon: 'ic-trend-down', tone: 'red', metricLabel: 'Pips', hasRange: true },
+    today: { title: "Today's Signals", icon: 'ic-calendar', tone: 'purple', metricLabel: 'Planned RR', hasRange: false },
+    breakeven: { title: 'Breakeven Signals', icon: 'ic-scale', tone: 'gold', metricLabel: 'Pips', hasRange: true },
+    closed: { title: 'Closed Positions', icon: 'ic-folder', tone: 'purple', metricLabel: 'Pips', hasRange: true },
+    pips: { title: 'Total Pips', icon: 'ic-zap', tone: 'green', metricLabel: 'Pips', hasRange: true },
+    totalr: { title: 'Total R', icon: 'ic-scale', tone: 'green', metricLabel: 'R Multiple', hasRange: true },
+  };
+
+  function _sigAnaBaseList(type, m) {
+    switch (type) {
+      case 'active': return m.active;
+      case 'wins': return m.wins;
+      case 'losses': return m.losses;
+      case 'today': return m.todays;
+      case 'breakeven': return m.all.filter(s => s.result === 'breakeven');
+      // Matches the "is this trade done" definition used for the Closed
+      // Positions widget itself (win + loss + breakeven).
+      case 'closed': return m.all.filter(s => s.result === 'win' || s.result === 'loss' || s.result === 'breakeven');
+      // `m.closed` (win/loss only) is exactly what Total Pips / Total R
+      // are summed from — reuse it so the drawer's total always matches
+      // the number on the card.
+      case 'pips': return m.closed;
+      case 'totalr': return m.closed;
+      default: return [];
+    }
+  }
+
+  function _sigAnaDateOf(s, type) {
+    if (type === 'today' || type === 'active') return s.created_at || 0;
+    return s.closed_at || s.created_at || 0;
+  }
+
+  function _sigAnaSortMetric(s, type) {
+    const em = _sigEffectiveMath(s);
+    if (type === 'totalr') return em.r_multiple || 0;
+    if (type === 'active' || type === 'today') return +s.risk_reward || 0;
+    return em.pips || 0;
+  }
+
+  function _sigAnaApplyFilters(list, type) {
+    let out = list.slice();
+    const q = (_sigAnaState.search || '').trim().toLowerCase();
+    if (q) {
+      out = out.filter(s => (s.pair || '').toLowerCase().includes(q)
+        || (SESSION_LABEL[s.session] || '').toLowerCase().includes(q)
+        || (MARKET_LABEL[s.market] || '').toLowerCase().includes(q));
+    }
+    if (SIG_ANA_META[type].hasRange && _sigAnaState.range !== 'all') {
+      const now = Date.now();
+      const cutoff = _sigAnaState.range === 'week' ? now - 7 * 86400000 : now - 30 * 86400000;
+      out = out.filter(s => _sigAnaDateOf(s, type) >= cutoff);
+    }
+    out.sort((a, b) => {
+      switch (_sigAnaState.sort) {
+        case 'date_asc': return _sigAnaDateOf(a, type) - _sigAnaDateOf(b, type);
+        case 'pair_az': return (a.pair || '').localeCompare(b.pair || '');
+        case 'metric_desc': return _sigAnaSortMetric(b, type) - _sigAnaSortMetric(a, type);
+        case 'metric_asc': return _sigAnaSortMetric(a, type) - _sigAnaSortMetric(b, type);
+        default: return _sigAnaDateOf(b, type) - _sigAnaDateOf(a, type);
+      }
+    });
+    return out;
+  }
+
+  function _sigAnaBestPair(list) {
+    const perf = {};
+    list.forEach(s => { if (s.result === 'win' || s.result === 'loss') { perf[s.pair] = perf[s.pair] || { win: 0, total: 0 }; perf[s.pair].total++; if (s.result === 'win') perf[s.pair].win++; } });
+    let best = '—', rate = -1;
+    Object.entries(perf).forEach(([k, v]) => { if (v.total >= 1 && v.win / v.total > rate) { rate = v.win / v.total; best = k; } });
+    return best;
+  }
+  function _sigAnaBestSession(list) {
+    const perf = {};
+    list.forEach(s => { if (s.result === 'win' || s.result === 'loss') { perf[s.session] = perf[s.session] || { win: 0, total: 0 }; perf[s.session].total++; if (s.result === 'win') perf[s.session].win++; } });
+    let best = '—', rate = -1;
+    Object.entries(perf).forEach(([k, v]) => { if (v.total >= 1 && v.win / v.total > rate) { rate = v.win / v.total; best = k; } });
+    return SESSION_LABEL[best] || best;
+  }
+  function _sigAnaMode(list, field) {
+    const counts = {};
+    list.forEach(s => { const v = s[field]; if (v) counts[v] = (counts[v] || 0) + 1; });
+    let best = '—', ct = -1;
+    Object.entries(counts).forEach(([k, v]) => { if (v > ct) { ct = v; best = k; } });
+    return best;
+  }
+
+  function _sigAnaStat(label, value, tone) {
+    return `<div class="sig-ana-stat"><span class="sig-ana-stat-label">${label}</span><span class="sig-ana-stat-val ${tone || ''}">${value}</span></div>`;
+  }
+
+  function _sigAnaSummary(type, list, m) {
+    let stats = [];
+    if (type === 'active') {
+      const entered = list.filter(s => ENTERED_STATUSES.includes(s.status)).length;
+      const pending = list.filter(s => s.status === 'waiting').length;
+      const avgRR = list.length ? (list.reduce((a, s) => a + (+s.risk_reward || 0), 0) / list.length) : 0;
+      stats = [
+        _sigAnaStat('Active Now', list.length, 'blue'),
+        _sigAnaStat('Entered', entered, 'green'),
+        _sigAnaStat('Pending Entry', pending, 'gold'),
+        _sigAnaStat('Avg Planned RR', '1:' + avgRR.toFixed(1)),
+      ];
+    } else if (type === 'wins') {
+      const totalPips = list.reduce((a, s) => a + _sigEffectiveMath(s).pips, 0);
+      const avgRR = list.length ? (list.reduce((a, s) => a + (+s.risk_reward || 0), 0) / list.length) : 0;
+      stats = [
+        _sigAnaStat('Total Wins', list.length, 'green'),
+        _sigAnaStat('Total Pips', '+' + totalPips.toFixed(0), 'green'),
+        _sigAnaStat('Avg RR Achieved', '1:' + avgRR.toFixed(1)),
+        _sigAnaStat('Best Session', _sigAnaBestSession(list), 'blue'),
+      ];
+    } else if (type === 'losses') {
+      const totalPips = list.reduce((a, s) => a + _sigEffectiveMath(s).pips, 0);
+      const avgR = list.length ? (list.reduce((a, s) => a + _sigEffectiveMath(s).r_multiple, 0) / list.length) : 0;
+      stats = [
+        _sigAnaStat('Total Losses', list.length, 'red'),
+        _sigAnaStat('Total Pips Lost', totalPips.toFixed(0), 'red'),
+        _sigAnaStat('Avg R Lost', avgR.toFixed(1) + 'R', 'red'),
+        _sigAnaStat('Most Affected Pair', _sigAnaMode(list, 'pair')),
+      ];
+    } else if (type === 'today') {
+      const activeToday = list.filter(s => ONGOING_STATUSES.includes(s.status)).length;
+      const closedToday = list.filter(s => _sigHasOutcome(s)).length;
+      let peakHour = 0, peakCt = -1;
+      m.hourly.forEach((v, h) => { if (v > peakCt) { peakCt = v; peakHour = h; } });
+      stats = [
+        _sigAnaStat('Created Today', list.length, 'purple'),
+        _sigAnaStat('Active Today', activeToday, 'blue'),
+        _sigAnaStat('Closed Today', closedToday, 'green'),
+        _sigAnaStat('Peak Hour', peakCt > 0 ? (peakHour % 12 || 12) + (peakHour < 12 ? 'am' : 'pm') : '—'),
+      ];
+    } else if (type === 'breakeven') {
+      const pct = m.all.length ? (list.length / m.all.length * 100) : 0;
+      stats = [
+        _sigAnaStat('Total Breakevens', list.length, 'gold'),
+        _sigAnaStat('% of All Signals', pct.toFixed(0) + '%', 'gold'),
+        _sigAnaStat('Most Common Session', _sigAnaMode(list, 'session') !== '—' ? (SESSION_LABEL[_sigAnaMode(list, 'session')] || _sigAnaMode(list, 'session')) : '—'),
+        _sigAnaStat('Most Common Pair', _sigAnaMode(list, 'pair')),
+      ];
+    } else if (type === 'closed') {
+      const wins = list.filter(s => s.result === 'win').length;
+      const losses = list.filter(s => s.result === 'loss').length;
+      const bes = list.filter(s => s.result === 'breakeven').length;
+      stats = [
+        _sigAnaStat('Total Closed', list.length, 'purple'),
+        _sigAnaStat('Wins', wins, 'green'),
+        _sigAnaStat('Losses', losses, 'red'),
+        _sigAnaStat('Breakevens', bes, 'gold'),
+      ];
+    } else if (type === 'pips') {
+      const totalPips = list.reduce((a, s) => a + _sigEffectiveMath(s).pips, 0);
+      const avg = list.length ? totalPips / list.length : 0;
+      stats = [
+        _sigAnaStat('Total Pips', (totalPips >= 0 ? '+' : '') + totalPips.toFixed(0), totalPips >= 0 ? 'green' : 'red'),
+        _sigAnaStat('Best Pair', _sigAnaBestPair(list), 'green'),
+        _sigAnaStat('Best Session', _sigAnaBestSession(list), 'blue'),
+        _sigAnaStat('Avg Pips / Trade', (avg >= 0 ? '+' : '') + avg.toFixed(1)),
+      ];
+    } else if (type === 'totalr') {
+      const rVals = list.map(s => _sigEffectiveMath(s).r_multiple);
+      const totalR = rVals.reduce((a, b) => a + b, 0);
+      const avgR = rVals.length ? totalR / rVals.length : 0;
+      const bestR = rVals.length ? Math.max(...rVals) : 0;
+      const worstR = rVals.length ? Math.min(...rVals) : 0;
+      stats = [
+        _sigAnaStat('Total R', (totalR >= 0 ? '+' : '') + totalR.toFixed(1) + 'R', totalR >= 0 ? 'green' : 'red'),
+        _sigAnaStat('Avg R', (avgR >= 0 ? '+' : '') + avgR.toFixed(1) + 'R'),
+        _sigAnaStat('Best Trade', (bestR >= 0 ? '+' : '') + bestR.toFixed(1) + 'R', 'green'),
+        _sigAnaStat('Worst Trade', worstR.toFixed(1) + 'R', 'red'),
+      ];
+    }
+    const showChart = (type === 'pips' || type === 'totalr' || type === 'today');
+    return `<div class="sig-ana-summary">${stats.join('')}</div>${showChart ? `<div class="sig-ana-chart-wrap"><svg class="sig-ana-chart" id="sig-ana-chart-svg" viewBox="0 0 300 60" preserveAspectRatio="none"></svg></div>` : ''}`;
+  }
+
+  function _sigAnaMountChart(type, list, m) {
+    const svg = document.getElementById('sig-ana-chart-svg');
+    if (!svg) return;
+    let arr = [];
+    let color = 'var(--blue)';
+    if (type === 'today') {
+      arr = m.hourly;
+      color = 'var(--purple)';
+    } else {
+      const sorted = list.slice().sort((a, b) => _sigAnaDateOf(a, type) - _sigAnaDateOf(b, type));
+      let cum = 0;
+      sorted.forEach(s => { cum += type === 'totalr' ? _sigEffectiveMath(s).r_multiple : _sigEffectiveMath(s).pips; arr.push(cum); });
+      if (!arr.length) arr = [0];
+      const last = arr[arr.length - 1];
+      color = last >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+    const path = _seriesPath(arr, 300, 52, 4);
+    svg.innerHTML = `<path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+  }
+
+  function _sigAnaRow(s, type) {
+    const em = _sigEffectiveMath(s);
+    const showOutcomeMetric = (type === 'wins' || type === 'losses' || type === 'closed' || type === 'pips' || type === 'breakeven') && _sigHasOutcome(s);
+    const showR = (type === 'totalr' || type === 'wins' || type === 'losses' || type === 'closed') && _sigHasOutcome(s);
+    const dateLabel = (type === 'today' || type === 'active') ? _timeAgo(s.created_at) : (s.closed_at ? _timeAgo(s.closed_at) : _timeAgo(s.created_at));
+    const dateIcon = (type === 'today' || type === 'active') ? 'ic-clock' : 'ic-calendar';
+    return `
+    <div class="sig-ana-row" onclick="_sigOpenDrawer('${s.id}')">
+      <div class="sig-ana-row-main">
+        <div class="sig-ana-row-top">
+          <span class="sig-card-pair">${s.pair}</span>
+          <span class="sig-dir-badge ${s.direction}">${s.direction === 'buy' ? '🟢 BUY' : '🔴 SELL'}</span>
+          <span class="sig-badge ${_sigStatusBadgeClass(s)}"><span class="dot"></span>${STATUS_LABEL[s.status] || s.status}</span>
+          ${_sigResultBadge(s)}
+        </div>
+        <div class="sig-ana-row-meta">
+          <span>${icn(dateIcon)} ${dateLabel}</span>
+          <span>${SESSION_LABEL[s.session] || (s.session || '—')}</span>
+          <span>Entry ${_fmtNum(s.entry)}</span>
+          <span>1:${s.risk_reward}</span>
+          ${showOutcomeMetric ? `<span class="sig-ana-metric ${em.pips >= 0 ? 'pos' : 'neg'}">${em.pips >= 0 ? '+' : ''}${em.pips.toFixed(1)} pips</span>` : ''}
+          ${showR ? `<span class="sig-ana-metric ${em.r_multiple >= 0 ? 'pos' : 'neg'}">${em.r_multiple >= 0 ? '+' : ''}${em.r_multiple.toFixed(1)}R</span>` : ''}
+        </div>
+      </div>
+      <div class="sig-ana-row-actions">
+        <button title="View" onclick="event.stopPropagation();_sigOpenDrawer('${s.id}')">${icn('ic-eye')}</button>
+        ${_sigIsAdmin() ? `<button title="Edit" onclick="event.stopPropagation();_sigOpenModal('edit','${s.id}')">${icn('ic-edit')}</button>` : ''}
+        ${_sigIsAdmin() && ONGOING_STATUSES.includes(s.status) ? `<button title="Update" onclick="event.stopPropagation();_sigOpenUpdateModal('${s.id}')">${icn('ic-notebook')}</button>` : ''}
+      </div>
+    </div>`;
+  }
+
+  function _sigAnaEmpty() {
+    return `<div class="sig-ana-empty">${icn('ic-inbox')}<div>No signals match this view yet.</div></div>`;
+  }
+
+  function _sigAnaSkeletonRow() {
+    return `<div class="sig-ana-skel-row"><div class="sig-skel sig-skel-a"></div><div class="sig-skel sig-skel-b"></div></div>`;
+  }
+  function _sigAnaSkeleton(type) {
+    const meta = SIG_ANA_META[type];
+    return `
+    <div class="sig-ana-head">
+      <div class="sig-ana-head-title"><span class="sig-stat-icon ${meta.tone}">${icn(meta.icon)}</span><h3>${meta.title}</h3></div>
+      <button class="sig-drawer-close" onclick="_sigCloseAnalyticsDrawer()">${icn('ic-close')}</button>
+    </div>
+    <div class="sig-ana-summary">${[1, 2, 3, 4].map(() => `<div class="sig-ana-stat"><div class="sig-skel sig-skel-stat"></div></div>`).join('')}</div>
+    <div class="sig-ana-list">${[1, 2, 3, 4, 5].map(_sigAnaSkeletonRow).join('')}</div>`;
+  }
+
+  function _sigAnaControls(type) {
+    const meta = SIG_ANA_META[type];
+    const SORT_OPTIONS = [
+      ['date_desc', 'Newest first'], ['date_asc', 'Oldest first'],
+      ['pair_az', 'Pair A → Z'],
+      ['metric_desc', `Highest ${meta.metricLabel}`], ['metric_asc', `Lowest ${meta.metricLabel}`],
+    ];
+    return `
+    <div class="sig-ana-controls">
+      <div class="sig-ana-search-wrap">
+        ${icn('ic-search')}
+        <input type="text" id="sig-ana-search" placeholder="Search pair or session…" value="${_sigAnaState.search.replace(/"/g, '&quot;')}" oninput="_sigAnaSetSearch(this.value)">
+      </div>
+      <select class="form-select sig-ana-sort" onchange="_sigAnaSetSort(this.value)">
+        ${SORT_OPTIONS.map(([v, l]) => `<option value="${v}" ${_sigAnaState.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    ${meta.hasRange ? `
+    <div class="sig-ana-range-chips">
+      ${[['all', 'All time'], ['week', 'This week'], ['month', 'This month']].map(([v, l]) => `<button class="sig-ana-chip ${_sigAnaState.range === v ? 'active' : ''}" onclick="_sigAnaSetRange('${v}')">${l}</button>`).join('')}
+      ${type === 'closed' ? `<button class="sig-ana-chip sig-ana-chip-export" onclick="_sigAnaExportCsv()">${icn('ic-download')} Export</button>` : ''}
+    </div>` : ''}`;
+  }
+
+  function _sigAnaHeader(type) {
+    const meta = SIG_ANA_META[type];
+    return `
+    <div class="sig-ana-head">
+      <div class="sig-ana-head-title"><span class="sig-stat-icon ${meta.tone}">${icn(meta.icon)}</span><h3>${meta.title} (<span id="sig-ana-count">0</span>)</h3></div>
+      <button class="sig-drawer-close" onclick="_sigCloseAnalyticsDrawer()">${icn('ic-close')}</button>
+    </div>`;
+  }
+
+  function _sigRenderAnalyticsShell() {
+    const drawer = document.getElementById('sig-analytics-drawer');
+    if (!drawer || !_sigAnaState.type) return;
+    const type = _sigAnaState.type;
+    drawer.innerHTML = `${_sigAnaHeader(type)}${_sigAnaControls(type)}<div id="sig-ana-body"></div>`;
+    window.attachPanelResize?.('sig-analytics-drawer', 'sigAnalyticsDrawerWidth');
+    _sigAnaRenderBody();
+  }
+
+  function _sigAnaRenderBody() {
+    const body = document.getElementById('sig-ana-body');
+    if (!body || !_sigAnaState.type) return;
+    const type = _sigAnaState.type;
+    const meta = SIG_ANA_META[type];
+    const m = _sigComputeMetrics();
+    const full = _sigAnaApplyFilters(_sigAnaBaseList(type, m), type);
+    const total = full.length;
+    const shown = full.slice(0, _sigAnaState.limit);
+    const countEl = document.getElementById('sig-ana-count');
+    if (countEl) countEl.textContent = total;
+    body.innerHTML = `
+      ${_sigAnaSummary(type, full, m)}
+      <div class="sig-ana-list">${shown.length ? shown.map(s => _sigAnaRow(s, type)).join('') : _sigAnaEmpty()}</div>
+      ${total > shown.length ? `<button class="btn sig-ana-loadmore" onclick="_sigAnaLoadMore()">${icn('ic-plus')} Load ${Math.min(SIG_ANA_BATCH, total - shown.length)} more (${total - shown.length} remaining)</button>` : ''}
+    `;
+    if (meta && (type === 'pips' || type === 'totalr' || type === 'today')) _sigAnaMountChart(type, full, m);
+  }
+
+  window._sigOpenAnalyticsDrawer = function (type) {
+    if (!SIG_ANA_META[type]) return;
+    _sigAnaState = { type, search: '', sort: 'date_desc', range: 'all', limit: SIG_ANA_BATCH };
+    let drawer = document.getElementById('sig-analytics-drawer');
+    if (!drawer) {
+      drawer = document.createElement('div');
+      drawer.className = 'detail-panel sig-analytics-drawer';
+      drawer.id = 'sig-analytics-drawer';
+      document.body.appendChild(drawer);
+    }
+    drawer.innerHTML = _sigAnaSkeleton(type);
+    window.attachPanelResize?.('sig-analytics-drawer', 'sigAnalyticsDrawerWidth');
+    requestAnimationFrame(() => drawer.classList.add('open'));
+    clearTimeout(_sigAnaLoadTimer);
+    // Brief, deliberate loading state — the underlying filter/sort is
+    // synchronous and instant, but a hard cut from skeleton to content
+    // reads as a rendering glitch rather than a fetch, so this gives the
+    // shimmer a moment to actually be seen.
+    _sigAnaLoadTimer = setTimeout(() => { if (_sigAnaState.type === type) _sigRenderAnalyticsShell(); }, 260);
+  };
+
+  window._sigCloseAnalyticsDrawer = function () {
+    const d = document.getElementById('sig-analytics-drawer');
+    if (d) d.classList.remove('open');
+    _sigAnaState.type = null;
+    clearTimeout(_sigAnaLoadTimer);
+  };
+
+  window._sigAnaSetSearch = function (v) {
+    _sigAnaState.search = v;
+    _sigAnaState.limit = SIG_ANA_BATCH;
+    _sigAnaRenderBody(); // body-only re-render so the search input never loses focus mid-keystroke
+  };
+  window._sigAnaSetSort = function (v) {
+    _sigAnaState.sort = v;
+    _sigAnaState.limit = SIG_ANA_BATCH;
+    _sigAnaRenderBody();
+  };
+  window._sigAnaSetRange = function (v) {
+    _sigAnaState.range = v;
+    _sigAnaState.limit = SIG_ANA_BATCH;
+    _sigRenderAnalyticsShell(); // rebuild controls too, so the active chip highlight updates
+  };
+  window._sigAnaLoadMore = function () {
+    _sigAnaState.limit += SIG_ANA_BATCH;
+    _sigAnaRenderBody();
+  };
+
+  window._sigAnaExportCsv = function () {
+    const type = _sigAnaState.type;
+    if (!type) return;
+    const m = _sigComputeMetrics();
+    const list = _sigAnaApplyFilters(_sigAnaBaseList(type, m), type);
+    const header = ['Pair', 'Direction', 'Market', 'Session', 'Status', 'Result', 'Entry', 'Stop Loss', 'TP1', 'TP2', 'Risk:Reward', 'Pips', 'R Multiple', 'Created', 'Closed'];
+    const rows = list.map(s => {
+      const em = _sigEffectiveMath(s);
+      return [
+        s.pair, s.direction, MARKET_LABEL[s.market] || s.market, SESSION_LABEL[s.session] || s.session,
+        STATUS_LABEL[s.status] || s.status, s.result || '', s.entry, s.stop_loss, s.tp1, s.tp2 || '',
+        '1:' + s.risk_reward, em.pips, em.r_multiple,
+        s.created_at ? new Date(s.created_at).toISOString() : '',
+        s.closed_at ? new Date(s.closed_at).toISOString() : '',
+      ];
+    });
+    const csv = [header, ...rows].map(r => r.map(v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `signals-${type}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${list.length} signals`, 'success');
+  };
+
+  // Click-outside-to-close — same pattern as the single-signal drawer.
+  document.addEventListener('click', (e) => {
+    const drawer = document.getElementById('sig-analytics-drawer');
+    if (!drawer || !drawer.classList.contains('open')) return;
+    if (drawer.contains(e.target)) return;
+    if (e.target.closest('[onclick*="_sigOpenAnalyticsDrawer"]')) return;
+    if (e.target.closest('.toast, .confirm-dialog, .dropdown-menu, #signal-drawer, #sig-modal-overlay, #sig-update-modal-overlay')) return;
+    window._sigCloseAnalyticsDrawer();
+  }, true);
+
+  // ESC closes whichever drawer is currently open — analytics drawer
+  // takes priority since it renders on top of the signal drawer.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const ana = document.getElementById('sig-analytics-drawer');
+    if (ana && ana.classList.contains('open')) { window._sigCloseAnalyticsDrawer(); return; }
+  });
+
+  // Drag-to-dismiss on mobile — mirrors the exact pattern already proven
+  // out on the single-signal drawer (initSignalDrawerSwipeToClose,
+  // further below): a top zone measured from the panel's own bounding
+  // rect, not a specific child element, and touch-action toggled inline
+  // (not just via CSS) so touch drags are reliably captured instead of
+  // scrolling the page underneath. There's no visual grab-handle bar
+  // on this drawer (removed — it duplicated the real close button), so
+  // the zone is sized to roughly cover the header band.
+  (function initSigAnalyticsDrawerSwipeToClose() {
+    const HANDLE_ZONE = 64;
+    const DISMISS_THRESHOLD = 90;
+    let startY = 0, lastY = 0, dragging = false;
+
+    function isMobileSheet(panel) {
+      return window.matchMedia('(max-width: 768px)').matches && panel.classList.contains('open');
+    }
+
+    document.addEventListener('pointerdown', (e) => {
+      const panel = document.getElementById('sig-analytics-drawer');
+      if (!panel || !isMobileSheet(panel) || !panel.contains(e.target)) return;
+      const rect = panel.getBoundingClientRect();
+      if (e.clientY - rect.top > HANDLE_ZONE) return;
+      dragging = true;
+      startY = lastY = e.clientY;
+      panel.style.transition = 'none';
+      panel.style.touchAction = 'none';
+      panel.setPointerCapture?.(e.pointerId);
+    });
+    document.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const panel = document.getElementById('sig-analytics-drawer');
+      if (!panel) return;
+      lastY = e.clientY;
+      const dy = Math.max(0, lastY - startY);
+      panel.style.transform = `translateY(${dy}px)`;
+    });
+    document.addEventListener('touchmove', (e) => {
+      if (dragging) e.preventDefault();
+    }, { passive: false });
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      const panel = document.getElementById('sig-analytics-drawer');
+      const dy = Math.max(0, lastY - startY);
+      if (panel) { panel.style.transition = ''; panel.style.transform = ''; panel.style.touchAction = ''; }
+      if (dy > DISMISS_THRESHOLD) window._sigCloseAnalyticsDrawer();
+    }
+    document.addEventListener('pointerup', endDrag);
+    document.addEventListener('pointercancel', endDrag);
+  })();
+
+  // ══════════════════════════════════════════════════════════════
   // TABLE VIEW
   // ══════════════════════════════════════════════════════════════
   function _fmtNum(n, dec) { return n === null || n === undefined ? '—' : (+n).toFixed(dec != null ? dec : 4).replace(/0+$/, '').replace(/\.$/, ''); }
@@ -1679,12 +2359,83 @@
   let _sigTableLimit = SIG_TABLE_BATCH;
   window._sigLoadMoreRows = function () { _sigTableLimit += SIG_TABLE_BATCH; _sigRenderActiveView(); };
 
+  // ── Table column sorting ─────────────────────────────────────────
+  // Client-side only — sorts whatever _sigFilteredSignals() already
+  // returned, so it composes with every existing filter/search chip
+  // instead of replacing them.
+  let _sigTableSort = { key: null, dir: 'asc' };
+  const SIG_TABLE_SORT_KEYS = {
+    status: s => STATUS_LABEL[s.status] || s.status || '',
+    pair: s => s.pair || '',
+    market: s => MARKET_LABEL[s.market] || s.market || '',
+    direction: s => s.direction || '',
+    entry: s => +s.entry || 0,
+    rr: s => +s.risk_reward || 0,
+    confidence: s => +s.confidence_score || 0,
+    session: s => SESSION_LABEL[s.session] || s.session || '',
+    date: s => s.created_at || 0,
+    result: s => s.result || '',
+    pips: s => _sigEffectiveMath(s).pips,
+    profit: s => _sigEffectiveMath(s).profit_percent,
+  };
+  window._sigSetTableSort = function (key) {
+    if (_sigTableSort.key === key) _sigTableSort.dir = _sigTableSort.dir === 'asc' ? 'desc' : 'asc';
+    else { _sigTableSort.key = key; _sigTableSort.dir = 'asc'; }
+    _sigRenderActiveView();
+  };
+  function _sigApplyTableSort(rows) {
+    if (!_sigTableSort.key || !SIG_TABLE_SORT_KEYS[_sigTableSort.key]) return rows;
+    const getVal = SIG_TABLE_SORT_KEYS[_sigTableSort.key];
+    const dir = _sigTableSort.dir === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      const av = getVal(a), bv = getVal(b);
+      if (typeof av === 'string') return av.localeCompare(bv) * dir;
+      return (av - bv) * dir;
+    });
+  }
+  function _sigSortIcon(key) {
+    if (_sigTableSort.key !== key) return `<span class="sig-th-sort-icn">${icn('ic-arrow-down', 'sig-th-sort-glyph')}</span>`;
+    return `<span class="sig-th-sort-icn active">${icn(_sigTableSort.dir === 'asc' ? 'ic-arrow-up' : 'ic-arrow-down', 'sig-th-sort-glyph')}</span>`;
+  }
+  function _sigTh(label, key) {
+    return `<th class="sig-th-sortable ${_sigTableSort.key === key ? 'active' : ''}" onclick="_sigSetTableSort('${key}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'){_sigSetTableSort('${key}')}">${label}${_sigSortIcon(key)}</th>`;
+  }
+
+  // ── Table CSV export ── exports every row currently matching the
+  // active filters/search/sort — not just the page that's loaded on
+  // screen — so it always matches what the person is looking at.
+  window._sigExportTableCsv = function () {
+    const rows = _sigApplyTableSort(_sigFilteredSignals());
+    if (!rows.length) { showToast('Nothing to export', 'info'); return; }
+    const header = ['Status', 'Pair', 'Market', 'Direction', 'Entry', 'Stop Loss', 'TP1', 'TP2', 'Order Type', 'Risk:Reward', 'Confidence', 'Session', 'Created', 'Result', 'Pips', 'Profit %'];
+    const csvRows = rows.map(s => {
+      const em = _sigEffectiveMath(s);
+      return [
+        STATUS_LABEL[s.status] || s.status, s.pair, MARKET_LABEL[s.market] || s.market, s.direction,
+        s.entry, s.stop_loss, s.tp1, s.tp2 || '', ORDER_TYPE_LABEL[s.order_type] || s.order_type,
+        '1:' + s.risk_reward, s.confidence_score != null ? s.confidence_score + '%' : '',
+        SESSION_LABEL[s.session] || s.session || '',
+        s.created_at ? new Date(s.created_at).toISOString() : '',
+        s.result || '', _sigHasOutcome(s) ? em.pips.toFixed(1) : '', _sigHasOutcome(s) ? em.profit_percent : '',
+      ];
+    });
+    const csv = [header, ...csvRows].map(r => r.map(v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `signals-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${rows.length} signal${rows.length === 1 ? '' : 's'}`, 'success');
+  };
+
   function _sigRenderTable(allRows) {
     if (!allRows.length) return _sigEmptyState();
-    const rows = allRows.slice(0, _sigTableLimit);
+    const sortedRows = _sigApplyTableSort(allRows);
+    const rows = sortedRows.slice(0, _sigTableLimit);
     const body = rows.map(s => {
       const expanded = _sigExpandedRows.has(s.id);
-      const statusTone = s.result === 'win' ? 'green' : s.result === 'loss' ? 'red' : ENTERED_STATUSES.includes(s.status) ? 'blue' : '';
+      const statusTone = s.result === 'win' ? 'green' : s.result === 'loss' ? 'red' : s.result === 'breakeven' ? 'gold' : ENTERED_STATUSES.includes(s.status) ? 'blue' : '';
       const em = _sigEffectiveMath(s);
       const expandRow = expanded ? `
       <tr class="sig-row-expand-tr">
@@ -1692,11 +2443,7 @@
           <div class="sig-row-expand">
             <div class="sig-row-expand-col">
               <div class="sig-section-title" style="margin-top:0">${icn('ic-bulb')} Management Rules</div>
-              <div class="sig-body-text">${s.management_rules || '—'}</div>
-            </div>
-            <div class="sig-row-expand-col">
-              <div class="sig-section-title" style="margin-top:0">${icn('ic-target')} Confluences</div>
-              <div class="sig-confluence-list">${(s.confluences || []).map(c => `<span class="sig-confluence-chip">${c}</span>`).join('') || '<span class="sig-body-text">—</span>'}</div>
+              <div class="sig-body-text">${MANAGEMENT_RULES_HTML}</div>
             </div>
             <div class="sig-row-expand-col sig-row-expand-actions">
               <button class="btn btn-primary" onclick="event.stopPropagation();_sigOpenDrawer('${s.id}')">${icn('ic-eye')} Full details</button>
@@ -1707,7 +2454,7 @@
       return `
       <tr class="sig-row sig-row-tone-${statusTone}" onclick="_sigOpenDrawer('${s.id}')">
         <td onclick="event.stopPropagation()"><button class="sig-expand-btn ${expanded ? 'open' : ''}" onclick="_sigToggleRowExpand('${s.id}', event)">${icn('ic-chevron-right')}</button></td>
-        <td><span class="sig-badge sig-badge-${s.status}"><span class="dot"></span>${STATUS_LABEL[s.status]}</span></td>
+        <td><span class="sig-badge ${_sigStatusBadgeClass(s)}"><span class="dot"></span>${STATUS_LABEL[s.status]}</span></td>
         <td><div class="sig-pair-cell"><span class="sig-pair-flag">${s.pair.slice(0, 2)}</span>${s.pair}</div></td>
         <td><span class="sig-market-badge">${icn(MARKET_ICON[s.market])}${MARKET_LABEL[s.market]}</span></td>
         <td><span class="sig-dir-badge ${s.direction}">${s.direction === 'buy' ? '🟢 BUY' : '🔴 SELL'}</span></td>
@@ -1735,12 +2482,16 @@
 
     return `
     <div class="sig-table-card">
+      <div class="sig-table-toolbar">
+        <span class="sig-table-count">${allRows.length} signal${allRows.length === 1 ? '' : 's'}</span>
+        <button class="btn sig-table-export-btn" onclick="_sigExportTableCsv()">${icn('ic-download')} <span>Export CSV</span></button>
+      </div>
       <div class="sig-table-scroll">
         <table>
           <thead><tr>
-            <th></th><th>Status</th><th>Pair</th><th>Market</th><th>Direction</th><th>Entry</th><th>SL</th>
-            <th>TP1</th><th>TP2</th><th>Order</th><th>RR</th><th>Confidence</th><th>Session</th>
-            <th>Date</th><th>Result</th><th>Pips</th><th>Profit %</th><th>Actions</th>
+            <th></th>${_sigTh('Status', 'status')}${_sigTh('Pair', 'pair')}${_sigTh('Market', 'market')}${_sigTh('Direction', 'direction')}${_sigTh('Entry', 'entry')}<th>SL</th>
+            <th>TP1</th><th>TP2</th><th>Order</th>${_sigTh('RR', 'rr')}${_sigTh('Confidence', 'confidence')}${_sigTh('Session', 'session')}
+            ${_sigTh('Date', 'date')}${_sigTh('Result', 'result')}${_sigTh('Pips', 'pips')}${_sigTh('Profit %', 'profit')}<th>Actions</th>
           </tr></thead>
           <tbody>${body}</tbody>
         </table>
@@ -1874,7 +2625,7 @@
           <span class="sig-dir-badge ${s.direction}">${s.direction === 'buy' ? '🟢 BUY' : '🔴 SELL'}</span>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <span class="sig-badge sig-badge-${s.status}"><span class="dot"></span>${STATUS_LABEL[s.status]}</span>
+          <span class="sig-badge ${_sigStatusBadgeClass(s)}"><span class="dot"></span>${STATUS_LABEL[s.status]}</span>
           <span class="sig-market-badge">${icn(MARKET_ICON[s.market])}${MARKET_LABEL[s.market]}</span>
           ${_sigResultBadge(s)}
         </div>
@@ -2116,6 +2867,58 @@
     rows.forEach(s => { const rr = +s.risk_reward || 0; if (rr < 1) rrBuckets['<1']++; else if (rr < 2) rrBuckets['1-2']++; else if (rr < 3) rrBuckets['2-3']++; else rrBuckets['3+']++; });
     const rrMax = Math.max(1, ...Object.values(rrBuckets));
 
+    function _sigFmtDur(ms) {
+      if (ms == null) return '—';
+      const hrs = ms / 3600000;
+      if (hrs < 1) return Math.max(1, Math.round(ms / 60000)) + 'm';
+      if (hrs < 48) return hrs.toFixed(1) + 'h';
+      return (hrs / 24).toFixed(1) + 'd';
+    }
+
+    // ── Highest RR seen across the filtered set ──
+    let highestRR = 0;
+    rows.forEach(s => { const rr = +s.risk_reward || 0; if (rr > highestRR) highestRR = rr; });
+
+    // ── Most traded pair (by signal count, not pips — a different lens
+    //    than "Best Pair" above) ──
+    let mostTradedPair = '—', mostTradedCt = 0;
+    Object.entries(byPair).forEach(([k, v]) => { if (v.n > mostTradedCt) { mostTradedCt = v.n; mostTradedPair = k; } });
+
+    // ── Win/loss streaks + drawdown, walked chronologically once ──
+    const chronoClosed = [...closed].sort((a, b) => a.created_at - b.created_at);
+    let runType = null, runLen = 0, bestWinStreak = 0, bestLossStreak = 0;
+    let peak = 0, cum = 0, maxDD = 0, ddSum = 0, ddCount = 0;
+    const durList = [];
+    let longestWinDur = null, fastestWinDur = null, longestLossDur = null;
+    chronoClosed.forEach(s => {
+      const t = s.result === 'win' ? 'win' : 'loss';
+      if (t === runType) runLen++; else { runType = t; runLen = 1; }
+      if (runType === 'win') bestWinStreak = Math.max(bestWinStreak, runLen);
+      else bestLossStreak = Math.max(bestLossStreak, runLen);
+
+      cum += _sigEffectiveMath(s).r_multiple;
+      if (cum > peak) peak = cum;
+      const dd = peak - cum;
+      if (dd > 0) { ddSum += dd; ddCount++; }
+      if (dd > maxDD) maxDD = dd;
+
+      const dur = (s.closed_at && s.entered_at) ? (s.closed_at - s.entered_at) : null;
+      if (dur != null) {
+        durList.push(dur);
+        if (t === 'win') {
+          if (longestWinDur == null || dur > longestWinDur) longestWinDur = dur;
+          if (fastestWinDur == null || dur < fastestWinDur) fastestWinDur = dur;
+        } else if (longestLossDur == null || dur > longestLossDur) longestLossDur = dur;
+      }
+    });
+    const curStreakType = runType, curStreakLen = runLen;
+    const avgDurationMs = durList.length ? durList.reduce((a, b) => a + b, 0) / durList.length : null;
+    const avgDD = ddCount ? ddSum / ddCount : 0;
+    const recoveryFactor = maxDD > 0 ? (totalR / maxDD).toFixed(2) : (totalR > 0 ? '∞' : '—');
+    const recoveryTone = recoveryFactor === '∞' ? 'green' : (parseFloat(recoveryFactor) >= 1 ? 'green' : (recoveryFactor === '—' ? null : 'red'));
+    const streakStrip = chronoClosed.slice(-24).map(s =>
+      `<span class="sig-streak-dot ${s.result === 'win' ? 'green' : 'red'}" title="${s.pair} · ${s.result}"></span>`).join('');
+
     const uniqueTiles = [
       ['ic-scale', 'Profit Factor', profitFactor, null],
       ['ic-trend-up', 'Expectancy', expectancy + 'R', +expectancy >= 0 ? 'green' : 'red'],
@@ -2123,6 +2926,14 @@
       ['ic-frown', 'Weakest Pair', worstPair, 'red'],
       ['ic-fire', 'Best Session', bestSession, 'gold'],
       ['ic-calendar', 'Best Weekday', bestDow, null],
+    ];
+    const proTiles = [
+      ['ic-ruler', 'Highest RR', highestRR ? `1:${highestRR.toFixed(1)}` : '—', 'gold'],
+      ['ic-trophy', 'Best Month', bestMonth, null],
+      ['ic-clock', 'Avg Trade Duration', _sigFmtDur(avgDurationMs), null],
+      ['ic-target', 'Most Traded Pair', mostTradedPair, 'blue'],
+      ['ic-scale', 'Recovery Factor', recoveryFactor, recoveryTone],
+      ['ic-trend-down', 'Max Drawdown', maxDD > 0 ? `-${maxDD.toFixed(1)}R` : '0.0R', maxDD > 0 ? 'red' : 'green'],
     ];
 
     const pairBars = pairRows.map(([pair, v]) => {
@@ -2166,6 +2977,12 @@
         <div class="sig-stat-value ${t[3] || ''}">${t[2]}</div>
       </div>`).join('')}</div>
 
+    <div class="sig-analytics-grid sig-analytics-grid-compact" style="margin-top:-6px">${proTiles.map(t => `
+      <div class="sig-analytics-card">
+        <div class="sig-analytics-title">${icn(t[0])}${t[1]}</div>
+        <div class="sig-stat-value ${t[3] || ''}">${t[2]}</div>
+      </div>`).join('')}</div>
+
     <div class="sig-analytics-panels">
       <div class="sig-analytics-panel">
         <div class="sig-section-title" style="margin-top:0">${icn('ic-star')} Performance by Pair</div>
@@ -2182,6 +2999,24 @@
       <div class="sig-analytics-panel">
         <div class="sig-section-title" style="margin-top:0">${icn('ic-ruler')} Risk:Reward Distribution</div>
         ${rrBars}
+      </div>
+      <div class="sig-analytics-panel">
+        <div class="sig-section-title" style="margin-top:0">${icn('ic-activity')} Win / Loss Streaks</div>
+        <div class="sig-mini-tile-row">
+          ${_sigMiniStat('Current Streak', curStreakLen ? `${curStreakLen}${curStreakType === 'win' ? 'W' : 'L'}` : '—', curStreakType === 'win' ? 'green' : curStreakType === 'loss' ? 'red' : null)}
+          ${_sigMiniStat('Best Win Streak', bestWinStreak || '—', 'green')}
+          ${_sigMiniStat('Worst Loss Streak', bestLossStreak || '—', 'red')}
+        </div>
+        ${streakStrip ? `<div class="sig-streak-strip">${streakStrip}</div>` : `<div class="sig-body-text" style="margin-top:8px">No closed signals yet.</div>`}
+      </div>
+      <div class="sig-analytics-panel">
+        <div class="sig-section-title" style="margin-top:0">${icn('ic-clock')} Trade Duration Extremes</div>
+        <div class="sig-mini-tile-row sig-mini-tile-row-wrap">
+          ${_sigMiniStat('Fastest Win', _sigFmtDur(fastestWinDur), 'green')}
+          ${_sigMiniStat('Longest Win', _sigFmtDur(longestWinDur), 'green')}
+          ${_sigMiniStat('Longest Loss', _sigFmtDur(longestLossDur), 'red')}
+          ${_sigMiniStat('Avg Drawdown', avgDD > 0 ? `-${avgDD.toFixed(1)}R` : '0.0R', avgDD > 0 ? 'gold' : 'green')}
+        </div>
       </div>
     </div>`;
   }
@@ -2255,6 +3090,7 @@
     }
     drawer.innerHTML = _sigDrawerContent(s);
     drawer.dataset.signalId = id;
+    window.attachPanelResize?.('signal-drawer', 'signalDrawerWidth');
     requestAnimationFrame(() => drawer.classList.add('open'));
     // Local/demo signals already have their updates & activity rendered
     // Updates & Activity are fetched fresh from Supabase every time the
@@ -2314,6 +3150,74 @@
     if (d) { d.classList.remove('open'); delete d.dataset.signalId; }
   };
 
+  // Close the drawer when clicking/tapping anywhere outside of it — the
+  // same "click outside closes the panel" pattern already used for the
+  // trade log's #detail-panel — so desktop users never have to hunt for
+  // a close button (and the mobile one is hidden entirely; see below).
+  document.addEventListener('click', (e) => {
+    const drawer = document.getElementById('signal-drawer');
+    if (!drawer || !drawer.classList.contains('open')) return;
+    if (drawer.contains(e.target)) return;
+    if (e.target.closest('[onclick*="_sigOpenDrawer"]')) return;
+    if (e.target.closest('.toast, .confirm-dialog, .dropdown-menu, #sig-prefs-modal-overlay, #sig-update-modal-overlay, #sig-modal-overlay, #sig-review-overlay')) return;
+    window._sigCloseDrawer();
+  }, true);
+
+  // Drag-to-dismiss on the mobile bottom-sheet's grab handle. The drawer
+  // is created on demand, so this listens at the document level (rather
+  // than binding once to a specific node) and resolves #signal-drawer
+  // fresh on every gesture — same behavior as the trade log panel's
+  // swipe-to-close, just wired for an element that doesn't exist yet
+  // at script-load time.
+  (function initSignalDrawerSwipeToClose() {
+    const HANDLE_ZONE = 40;       // px from the panel's top counted as the grab band
+    const DISMISS_THRESHOLD = 90; // px of downward drag needed to trigger close
+    let startY = 0, lastY = 0, dragging = false;
+
+    function isMobileSheet(panel) {
+      return window.matchMedia('(max-width: 768px)').matches
+        && panel.classList.contains('open')
+        && !panel.classList.contains('fullscreen');
+    }
+
+    document.addEventListener('pointerdown', (e) => {
+      const panel = document.getElementById('signal-drawer');
+      if (!panel || !isMobileSheet(panel) || !panel.contains(e.target)) return;
+      const rect = panel.getBoundingClientRect();
+      if (e.clientY - rect.top > HANDLE_ZONE) return;
+      dragging = true;
+      startY = lastY = e.clientY;
+      panel.style.transition = 'none';
+      panel.style.touchAction = 'none';
+      panel.setPointerCapture?.(e.pointerId);
+    });
+    document.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const panel = document.getElementById('signal-drawer');
+      if (!panel) return;
+      lastY = e.clientY;
+      const dy = Math.max(0, lastY - startY);
+      panel.style.transform = `translateX(0) translateY(${dy}px)`;
+    });
+    document.addEventListener('touchmove', (e) => {
+      if (dragging) e.preventDefault();
+    }, { passive: false });
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      const panel = document.getElementById('signal-drawer');
+      const dy = Math.max(0, lastY - startY);
+      if (panel) {
+        panel.style.transition = '';
+        panel.style.transform = '';
+        panel.style.touchAction = '';
+      }
+      if (dy > DISMISS_THRESHOLD) window._sigCloseDrawer();
+    }
+    document.addEventListener('pointerup', endDrag);
+    document.addEventListener('pointercancel', endDrag);
+  })();
+
   function _sigDrawerContent(s) {
     return `
     <div class="sig-drawer-head">
@@ -2324,7 +3228,7 @@
           ${s.edited_at ? '<span class="sig-edited-badge">Edited</span>' : ''}
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <span class="sig-badge sig-badge-${s.status}"><span class="dot"></span>${STATUS_LABEL[s.status] || s.status}</span>
+          <span class="sig-badge ${_sigStatusBadgeClass(s)}"><span class="dot"></span>${STATUS_LABEL[s.status] || s.status}</span>
           ${s.archived ? '<span class="sig-badge sig-badge-archived"><span class="dot"></span>Archived</span>' : ''}
           <span class="sig-market-badge">${icn(MARKET_ICON[s.market])}${MARKET_LABEL[s.market]}</span>
           ${_sigOrderTypeBadge(s)}
@@ -2359,14 +3263,11 @@
     </div>
     <div class="sig-ladder-rr">${icn('ic-scale')} Risk : Reward — 1:${s.risk_reward}</div>
 
-    <div class="sig-section-title">${icn('ic-warning')} Invalidation</div>
-    <div class="sig-body-text">${s.invalidation || '—'}</div>
-
     <div class="sig-section-title">${icn('ic-notebook')} Management Rules</div>
-    <div class="sig-body-text">${s.management_rules || '—'}</div>
+    <div class="sig-body-text">${MANAGEMENT_RULES_HTML}</div>
 
     <div class="sig-section-title">${icn('ic-clock')} Session &amp; Duration</div>
-    <div class="sig-body-text">${SESSION_LABEL[s.session] || (s.session || '—')} · Risk : Reward 1:${s.risk_reward}</div>
+    <div class="sig-body-text">${SESSION_LABEL[s.session] || (s.session || '—')}</div>
 
     <div class="sig-section-title">${icn('ic-speech')} Comments</div>
     <div id="sig-comments-${s.id}">${(s.comments || []).map(c => `
@@ -2629,7 +3530,7 @@
       <div class="modal-body">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
           <span class="sig-body-text" style="margin:0">Current stage:</span>
-          <span class="sig-badge sig-badge-${s.status}"><span class="dot"></span>${STATUS_LABEL[s.status] || s.status}</span>
+          <span class="sig-badge ${_sigStatusBadgeClass(s)}"><span class="dot"></span>${STATUS_LABEL[s.status] || s.status}</span>
         </div>
         ${isTerminal ? `
           <div class="sig-body-text" style="margin-bottom:16px">This signal is already ${STATUS_LABEL[s.status].toLowerCase()}. You can still log a note below, but the stage won't change.</div>
@@ -2799,7 +3700,7 @@
     const s = _sigAll.find(x => x.id === id);
     if (!s) return;
     // Lightweight text export (kept dependency-free). Swap for a PDF lib if you want a styled PDF.
-    const text = `NxTGen Signal — ${s.pair} ${s.direction.toUpperCase()}\n\nStatus: ${STATUS_LABEL[s.status]}\nOrder Type: ${ORDER_TYPE_LABEL[s.order_type] || 'Market Execution'}\nEntry: ${_fmtNum(s.entry)}\nStop Loss: ${_fmtNum(s.stop_loss)}\nTP1/TP2: ${_fmtNum(s.tp1)} / ${_fmtNum(s.tp2)}\nRisk:Reward: 1:${s.risk_reward}\nConfidence: ${CONF_LABEL[s.confidence]} (${s.confidence_score}%)\nSession: ${SESSION_LABEL[s.session] || (s.session || '—')}\n\nMarket outlook:\n${s.market_outlook || '—'}\n\nInvalidation:\n${s.invalidation || '—'}\n`;
+    const text = `NxTGen Signal — ${s.pair} ${s.direction.toUpperCase()}\n\nStatus: ${STATUS_LABEL[s.status]}\nOrder Type: ${ORDER_TYPE_LABEL[s.order_type] || 'Market Execution'}\nEntry: ${_fmtNum(s.entry)}\nStop Loss: ${_fmtNum(s.stop_loss)}\nTP1/TP2: ${_fmtNum(s.tp1)} / ${_fmtNum(s.tp2)}\nRisk:Reward: 1:${s.risk_reward}\nConfidence: ${CONF_LABEL[s.confidence]} (${s.confidence_score}%)\nSession: ${SESSION_LABEL[s.session] || (s.session || '—')}\n\nMarket outlook:\n${s.market_outlook || '—'}\n`;
     const blob = new Blob([text], { type: 'text/plain' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -2988,7 +3889,11 @@
             <select class="form-select" id="sf-visibility"><option value="public" ${opt('public', s.visibility)}>Public</option><option value="premium" ${opt('premium', s.visibility)}>Premium</option><option value="private" ${opt('private', s.visibility)}>Private</option></select>
           </div>
 
-          <div class="form-field full"><label class="form-label">Management Rules</label><textarea class="form-textarea" id="sf-mgmt">${s.management_rules || ''}</textarea></div>
+          <div class="form-field full">
+            <label class="form-label">Management Rules</label>
+            <div class="sig-mgmt-rules-box"><div class="sig-body-text">${MANAGEMENT_RULES_HTML}</div></div>
+            <div class="sig-form-hint">${icn('ic-info')} Standard house rule, applied automatically to every signal — not editable per-signal.</div>
+          </div>
           <div class="form-field full"><label class="form-label">Notes</label><textarea class="form-textarea" id="sf-notes" placeholder="Private notes — not shown publicly">${s.notes || ''}</textarea></div>
           <div class="form-field"><label class="form-label">Tags</label><input class="form-input" id="sf-tags" placeholder="breakout, htf-bias, news" value="${(s.tags || []).join(', ')}"></div>
           <div class="form-field"><label class="form-label">TradingView Link</label><input class="form-input" id="sf-tvlink" placeholder="https://tradingview.com/…" value="${s.tradingview_link || ''}"></div>
