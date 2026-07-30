@@ -2468,6 +2468,7 @@
       return `
       <tr class="sig-row sig-row-tone-${statusTone}" onclick="_sigOpenDrawer('${s.id}')">
         <td onclick="event.stopPropagation()"><button class="sig-expand-btn ${expanded ? 'open' : ''}" onclick="_sigToggleRowExpand('${s.id}', event)">${icn('ic-chevron-right')}</button></td>
+        <td>${_timeAgo(s.created_at)}</td>
         <td><span class="sig-badge ${_sigStatusBadgeClass(s)}"><span class="dot"></span>${STATUS_LABEL[s.status]}</span></td>
         <td><div class="sig-pair-cell"><span class="sig-pair-flag">${s.pair.slice(0, 2)}</span>${s.pair}</div></td>
         <td><span class="sig-market-badge">${icn(MARKET_ICON[s.market])}${MARKET_LABEL[s.market]}</span></td>
@@ -2480,7 +2481,6 @@
         <td>${_sigRrViz(s)}</td>
         <td>${_sigConfBadge(s)}</td>
         <td>${SESSION_LABEL[s.session] || (s.session || '—')}</td>
-        <td>${_timeAgo(s.created_at)}</td>
         <td>${_sigResultBadge(s)}</td>
         <td class="${em.pips > 0 ? 'sig-pips-pos' : em.pips < 0 ? 'sig-pips-neg' : ''}">${_sigHasOutcome(s) ? (em.pips > 0 ? '+' : '') + em.pips.toFixed(1) : '—'}</td>
         <td class="${em.profit_percent > 0 ? 'sig-pips-pos' : em.profit_percent < 0 ? 'sig-pips-neg' : ''}">${_sigHasOutcome(s) ? (em.profit_percent > 0 ? '+' : '') + em.profit_percent + '%' : '—'}</td>
@@ -2503,9 +2503,9 @@
       <div class="sig-table-scroll">
         <table>
           <thead><tr>
-            <th></th>${_sigTh('Status', 'status')}${_sigTh('Pair', 'pair')}${_sigTh('Market', 'market')}${_sigTh('Direction', 'direction')}${_sigTh('Entry', 'entry')}<th>SL</th>
+            <th></th>${_sigTh('Date', 'date')}${_sigTh('Status', 'status')}${_sigTh('Pair', 'pair')}${_sigTh('Market', 'market')}${_sigTh('Direction', 'direction')}${_sigTh('Entry', 'entry')}<th>SL</th>
             <th>TP1</th><th>TP2</th><th>Order</th>${_sigTh('RR', 'rr')}${_sigTh('Confidence', 'confidence')}${_sigTh('Session', 'session')}
-            ${_sigTh('Date', 'date')}${_sigTh('Result', 'result')}${_sigTh('Pips', 'pips')}${_sigTh('Profit %', 'profit')}<th>Actions</th>
+            ${_sigTh('Result', 'result')}${_sigTh('Pips', 'pips')}${_sigTh('Profit %', 'profit')}<th>Actions</th>
           </tr></thead>
           <tbody>${body}</tbody>
         </table>

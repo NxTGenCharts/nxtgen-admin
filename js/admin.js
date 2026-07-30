@@ -225,6 +225,7 @@
       return `
       <tr class="${_admSelected.has(s.id) ? 'bulk-selected' : ''}">
         <td onclick="event.stopPropagation()"><input type="checkbox" class="bulk-chk" data-id="${s.id}" ${checked} onchange="_admToggleRow('${s.id}', this.checked)"></td>
+        <td title="${_admDateTaken(s) ? new Date(_admDateTaken(s)).toLocaleString() : ''}">${_admFmtDate(_admDateTaken(s))}</td>
         <td><div class="sig-pair-cell">${s.pair || '—'}</div></td>
         <td>${_cap(s.market)}</td>
         <td>${s.direction ? `<span class="sig-dir-badge ${s.direction}">${s.direction === 'buy' ? '🟢 BUY' : '🔴 SELL'}</span>` : '—'}</td>
@@ -238,7 +239,6 @@
           </select>
         </td>
         <td>${s.archived ? `<span class="sig-badge sig-badge-archived"><span class="dot"></span>Archived</span>` : '—'}</td>
-        <td title="${_admDateTaken(s) ? new Date(_admDateTaken(s)).toLocaleString() : ''}">${_admFmtDate(_admDateTaken(s))}</td>
         <td>${_admTimeAgo(s.created_at)}</td>
         <td class="adm-row-actions" onclick="event.stopPropagation()">
           <button title="Edit" onclick="_admEdit('${s.id}')">${icn('ic-edit')}</button>
@@ -249,12 +249,12 @@
     }).join('');
 
     root.innerHTML = `
-    <div class="sig-table-card">
+    <div class="sig-table-card adm-signals-table-card">
       <div class="sig-table-scroll">
         <table>
           <thead><tr>
             <th><input type="checkbox" id="adm-select-all" onchange="_admSelectAll(this.checked)"></th>
-            <th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Result</th><th>Visibility</th><th>Archived</th><th>Date Taken</th><th>Created</th><th>Actions</th>
+            <th>Date Taken</th><th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Result</th><th>Visibility</th><th>Archived</th><th>Created</th><th>Actions</th>
           </tr></thead>
           <tbody>${body}</tbody>
         </table>
