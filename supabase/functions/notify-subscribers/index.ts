@@ -278,6 +278,13 @@ function resolveEmailKind(eventType: string, status: string): EmailKind {
   // "Entry Triggered" stage — distinct from the generic status switch
   // below so it gets its own themed email instead of the 'update' fallback.
   if (eventType === 'entry_triggered') return 'entry_triggered';
+  // TP2 now closes the signal in the same write (status becomes "closed"
+  // — see the signal-monitor TP2 branch), so the row's fresh status alone
+  // can no longer tell a TP2 completion apart from any other closed trade.
+  // signal-monitor passes this explicit event_type precisely so the
+  // "Take Profit 2 Hit" template still renders instead of falling back to
+  // the generic "Trade Closed" one.
+  if (eventType === 'tp2_hit') return 'tp2_hit';
   switch (status) {
     case 'tp1_hit': return 'tp1_hit';
     case 'tp2_hit': return 'tp2_hit';
