@@ -632,9 +632,20 @@
   .sig-filter-bar{flex-direction:column;align-items:stretch}
   .sig-filter-dropdown-wrap{width:100%}
   .sig-search-wrap{width:100%;min-width:0;margin-left:0}
-  .sig-table-scroll th:nth-child(4),.sig-table-scroll td:nth-child(4),
-  .sig-table-scroll th:nth-child(10),.sig-table-scroll td:nth-child(10),
-  .sig-table-scroll th:nth-child(13),.sig-table-scroll td:nth-child(13){display:none}
+  /* Hides Market, Order, and Session columns on narrow screens — indices
+     shifted by +1 (5/11/14) after Date moved to be the 2nd column,
+     ahead of Status. Scoped away from .adm-signals-table-card (the admin
+     management table below), which has a different column layout and
+     its own matching rule right after this one. */
+  .sig-table-card:not(.adm-signals-table-card) .sig-table-scroll th:nth-child(5),.sig-table-card:not(.adm-signals-table-card) .sig-table-scroll td:nth-child(5),
+  .sig-table-card:not(.adm-signals-table-card) .sig-table-scroll th:nth-child(11),.sig-table-card:not(.adm-signals-table-card) .sig-table-scroll td:nth-child(11),
+  .sig-table-card:not(.adm-signals-table-card) .sig-table-scroll th:nth-child(14),.sig-table-card:not(.adm-signals-table-card) .sig-table-scroll td:nth-child(14){display:none}
+  /* Admin management table (js/admin.js _admRender): checkbox, Date Taken,
+     Pair, Market, Direction, Status, Result, Visibility, Archived,
+     Created, Actions — hides Direction (5) and Created (10) on narrow
+     screens, same columns it hid before Date Taken became the 2nd column. */
+  .adm-signals-table-card .sig-table-scroll th:nth-child(5),.adm-signals-table-card .sig-table-scroll td:nth-child(5),
+  .adm-signals-table-card .sig-table-scroll th:nth-child(10),.adm-signals-table-card .sig-table-scroll td:nth-child(10){display:none}
   .sig-table-scroll table{min-width:680px}
 }
 @media (max-width:768px){
