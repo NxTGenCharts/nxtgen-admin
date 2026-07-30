@@ -366,17 +366,22 @@
   };
 
   // Reuse the existing Signals edit modal rather than building a second one.
+  // _sigEnsureLoaded() only does the real work (fetch + render) the first
+  // time _sigAll is needed this session — after that, signals.js's own
+  // realtime subscription (started inside that first load) keeps the data
+  // fresh in the background, so this becomes an instant no-op instead of
+  // a multi-second reload on every single click.
   window._admEdit = async function (id) {
-    if (typeof window.buildSignals === 'function') { await window.buildSignals(); }
+    if (typeof window._sigEnsureLoaded === 'function') { await window._sigEnsureLoaded(); }
     if (typeof window._sigOpenModal === 'function') { window._sigOpenModal('edit', id); }
   };
 
   // "Add Update" (log a stage change / note against a live or closed signal)
   // is a separate modal+overlay from Edit in signals.js (_sigOpenUpdateModal,
-  // not _sigOpenModal) — same buildSignals()-first pattern as Edit above, so
+  // not _sigOpenModal) — same load-once pattern as Edit above, so
   // _sigAll is populated before it looks the signal up.
   window._admAddUpdate = async function (id) {
-    if (typeof window.buildSignals === 'function') { await window.buildSignals(); }
+    if (typeof window._sigEnsureLoaded === 'function') { await window._sigEnsureLoaded(); }
     if (typeof window._sigOpenUpdateModal === 'function') { window._sigOpenUpdateModal(id); }
   };
 
@@ -385,12 +390,13 @@
   // admin-gate.js hard-locks nav() to always land on Admin on this subdomain,
   // so a nav('signals', ...) call here would silently bounce back to Admin
   // and buildSignals() (which loads _sigAll and builds the modal's supporting
-  // state) would never run. Calling buildSignals() directly — exactly like
-  // _admEdit above already does — loads that state invisibly into the
+  // state) would never run. Calling _sigEnsureLoaded() directly — exactly
+  // like _admEdit above already does — loads that state invisibly into the
   // hidden #page-signals container without switching pages, then opens the
-  // modal on top of Admin.
+  // modal on top of Admin. Only the very first call this session actually
+  // fetches anything; every call after that is instant.
   window._admGoCreateSignal = async function () {
-    if (typeof window.buildSignals === 'function') { await window.buildSignals(); }
+    if (typeof window._sigEnsureLoaded === 'function') { await window._sigEnsureLoaded(); }
     if (typeof window._sigOpenModal === 'function') { window._sigOpenModal(); }
   };
 

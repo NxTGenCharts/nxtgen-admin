@@ -534,6 +534,20 @@
     }
   };
 
+  // For callers that only need _sigAll populated and the modal machinery
+  // ready (the Admin page's New Signal / Edit / Add Update buttons —
+  // they open the Signals modal without actually navigating to the
+  // Signals page) — not a real visit to the Signals page, so it doesn't
+  // need buildSignals()'s full re-fetch + re-render every single time.
+  // Once loaded once, _sigWatchLiveUpdates()'s realtime subscription (plus
+  // its 30s fallback poll) already keeps _sigAll fresh in the background,
+  // so repeat calls are then just a no-op instead of a multi-second
+  // network round trip on every click.
+  window._sigEnsureLoaded = async function () {
+    if (_sigInitDone) return;
+    await buildSignals();
+  };
+
   // Keep the notification badge (and its sound/desktop-alert side effects
   // in _sigRefreshNotifBadge) live without a manual refresh: try Supabase
   // Realtime first for near-instant updates, and always keep a 20s poll
