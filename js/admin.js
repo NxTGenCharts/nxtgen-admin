@@ -43,6 +43,15 @@
   function _admIsAdmin() {
     return typeof window._sigIsAdmin === 'function' && window._sigIsAdmin();
   }
+  // Date a signal was actually taken (entered) — falls back to when it was
+  // published/created if it hasn't been entered yet (e.g. still waiting).
+  function _admDateTaken(s) {
+    return s.entered_at || s.published_at || s.created_at || null;
+  }
+  function _admFmtDate(ts) {
+    if (!ts) return '—';
+    return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
 
   // Called once auth state is known (see core-modals-userbar.js hook) to
   // show/hide every nav entry marked with the .js-admin-nav class.
@@ -229,6 +238,7 @@
           </select>
         </td>
         <td>${s.archived ? `<span class="sig-badge sig-badge-archived"><span class="dot"></span>Archived</span>` : '—'}</td>
+        <td title="${_admDateTaken(s) ? new Date(_admDateTaken(s)).toLocaleString() : ''}">${_admFmtDate(_admDateTaken(s))}</td>
         <td>${_admTimeAgo(s.created_at)}</td>
         <td class="adm-row-actions" onclick="event.stopPropagation()">
           <button title="Edit" onclick="_admEdit('${s.id}')">${icn('ic-edit')}</button>
@@ -244,7 +254,7 @@
         <table>
           <thead><tr>
             <th><input type="checkbox" id="adm-select-all" onchange="_admSelectAll(this.checked)"></th>
-            <th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Result</th><th>Visibility</th><th>Archived</th><th>Created</th><th>Actions</th>
+            <th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Result</th><th>Visibility</th><th>Archived</th><th>Date Taken</th><th>Created</th><th>Actions</th>
           </tr></thead>
           <tbody>${body}</tbody>
         </table>
