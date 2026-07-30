@@ -169,8 +169,7 @@ function _ensureAffirmationUI() {
         </div>
         <div class="ai-float-chat-body" id="ai-float-chat-body"></div>
       </div>
-    </div>
-    <button class="affirmation-fab" id="affirmation-fab" onclick="_fabClick(this)"></button>`;
+    </div>`;
   document.body.appendChild(wrap);
   document.getElementById('affirmation-overlay').addEventListener('click', e => {
     if (e.target.id === 'affirmation-overlay') closeAffirmationModal();
@@ -178,8 +177,9 @@ function _ensureAffirmationUI() {
   document.getElementById('ai-float-chat-overlay').addEventListener('click', e => {
     if (e.target.id === 'ai-float-chat-overlay') closeFloatingChat();
   });
-  _initFabPosition(document.getElementById('affirmation-fab'));
-  _renderFabIcon(document.getElementById('affirmation-fab'));
+  // No floating FAB button in the admin app — this is an admin-only tool,
+  // not a trader's dashboard, so the Daily Affirmations / quick-chat launcher
+  // has nothing to anchor to and was just overlapping page content instead.
   if (typeof _nxSyncFabVisibility === 'function') _nxSyncFabVisibility();
 }
 
