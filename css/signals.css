@@ -4,6 +4,18 @@
    Reuses tokens from base-tokens-layout.css — no new colors invented.
    ══════════════════════════════════════════════════════════════ */
 
+/* New/Edit Signal is the largest, most content-heavy modal in the app,
+   so it leaves more of the background exposed around it than a smaller
+   dialog — with the app-wide --vibrancy-2xl blur (80px blur, 2.6
+   saturate) that's a lot of pixels for the browser to re-blur on every
+   frame of the open animation, especially over a busy background like
+   the Admin dashboard's table. Scoped down to just this modal so every
+   other modal in the app keeps the original vibrancy look.       */
+#sig-modal-overlay .modal {
+  backdrop-filter: blur(26px) saturate(1.8) !important;
+  -webkit-backdrop-filter: blur(26px) saturate(1.8) !important;
+}
+
 /* ── Page header ─────────────────────────────────────────────── */
 .sig-header{
   display:flex;align-items:flex-start;justify-content:space-between;
