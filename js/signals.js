@@ -3761,11 +3761,13 @@
     _sigBindAutosave();
     if (_sigModalState.timer) clearInterval(_sigModalState.timer);
     _sigModalState.timer = setInterval(_sigAutosaveTick, 4000);
+    _sfLiveInit();
   };
   window._sigCloseModal = function () {
     const o = document.getElementById('sig-modal-overlay');
     if (o) o.classList.remove('open');
     if (_sigModalState.timer) { clearInterval(_sigModalState.timer); _sigModalState.timer = null; }
+    _sfLiveStop();
   };
 
   let _sigPendingScreenshotDataUrl = null;
@@ -3905,11 +3907,11 @@
           <div class="form-field sig-pair-field">
             <label class="form-label">Pair</label>
             <input class="form-input" id="sf-pair" placeholder="EURUSD" value="${s.pair || ''}" autocomplete="off"
-              oninput="_sigPairSearchDebounced()" onfocus="_sigPairSearchDebounced()" onblur="setTimeout(_sigClosePairDropdown, 150)">
+              oninput="_sigPairSearchDebounced();_sfHandlePairInputDebounced()" onfocus="_sigPairSearchDebounced()" onblur="setTimeout(_sigClosePairDropdown, 150)">
             <div class="sig-pair-dropdown" id="sf-pair-dropdown" style="display:none"></div>
           </div>
           <div class="form-field"><label class="form-label">Market</label>
-            <select class="form-select" id="sf-market">
+            <select class="form-select" id="sf-market" onchange="_sfPairMarketChanged()">
               ${Object.entries(MARKET_LABEL).map(([k, v]) => `<option value="${k}" ${opt(k, s.market)}>${v}</option>`).join('')}
             </select>
           </div>
@@ -3917,12 +3919,16 @@
             <select class="form-select" id="sf-direction" onchange="_sigAutoCalcTp1()"><option value="buy" ${opt('buy', s.direction)}>🟢 BUY</option><option value="sell" ${opt('sell', s.direction)}>🔴 SELL</option></select>
           </div>
           <div class="form-field"><label class="form-label">Order Type</label>
-            <select class="form-select" id="sf-ordertype">
+            <select class="form-select" id="sf-ordertype" onchange="_sfHandleOrderTypeChange()">
               ${Object.entries(ORDER_TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${opt(k, s.order_type || 'market')}>${v}${PENDING_ORDER_TYPES.includes(k) ? ' (Pending)' : ''}</option>`).join('')}
             </select>
           </div>
 
-          <div class="form-field"><label class="form-label">Entry</label><input class="form-input" id="sf-entry" type="number" step="any" value="${s.entry ?? ''}" onblur="_sigAutoCalcTp1()"></div>
+          <div class="form-field">
+            <label class="form-label">Entry</label>
+            <input class="form-input" id="sf-entry" type="number" step="any" value="${s.entry ?? ''}" onblur="_sigAutoCalcTp1()" oninput="_sfHandleEntryManualInput()">
+            <div class="sf-live-price" id="sf-live-price" style="display:none"></div>
+          </div>
           <div class="form-field"><label class="form-label">Stop Loss</label><input class="form-input" id="sf-sl" type="number" step="any" value="${s.stop_loss ?? ''}" onblur="_sigAutoCalcTp1()"></div>
           <div class="form-field">
             <label class="form-label">Take Profit 1</label>
@@ -4079,6 +4085,7 @@
     if (mappedMarket && marketSelect) { marketSelect.value = mappedMarket; }
     _sigClosePairDropdown();
     if (window._sigAutoCalcTp1) window._sigAutoCalcTp1();
+    _sfPairMarketChanged();
   };
 
   window._sigClosePairDropdown = function () {
@@ -4103,6 +4110,225 @@
     _sigModalState.dirty = true;
     _sigSetAutosaveLabel('Unsaved changes');
   };
+
+  // ══════════════════════════════════════════════════════════════
+  // LIVE MARKET PRICE — New/Edit Signal modal
+  // Reuses the exact same data path as Backtesting Lab's Chart Replay
+  // (_repFetchCandles -> market-data-proxy Edge Function -> Twelve
+  // Data/Dukascopy/OANDA with server-side caching + auto-fallback —
+  // see REP_SOURCES/_repFetchCandles in backtesting-lab.js). No new
+  // service, no new key: we just ask for the most recent 1-minute
+  // candle for whatever pair is currently typed and use its close as
+  // the "live" price. The Edge Function's own cache keeps this from
+  // ever hammering the vendor even with a 20s UI poll while the modal
+  // is open.
+  // ══════════════════════════════════════════════════════════════
+  let _sfLiveState = null; // { pair, market, price, updatedAt, loading, error, pollTimer, uiTimer, token, entryOverridden }
+
+  // Decimal precision — typed Entry/SL/TP decimals win if present
+  // (whoever's building the signal already picked the right tick size
+  // for this instrument), otherwise a sensible per-market default.
+  function _sfLiveDecimals() {
+    let maxDec = 0;
+    ['sf-entry', 'sf-sl', 'sf-tp1', 'sf-tp2'].forEach(id => {
+      const v = document.getElementById(id)?.value;
+      if (v === undefined || v === null || v === '') return;
+      const str = String(v);
+      const dot = str.indexOf('.');
+      if (dot >= 0) maxDec = Math.max(maxDec, str.length - dot - 1);
+    });
+    if (maxDec > 0) return Math.min(maxDec, 5);
+    const market = document.getElementById('sf-market')?.value;
+    const pair = document.getElementById('sf-pair')?.value || '';
+    if (market === 'forex') return /JPY/i.test(pair) ? 3 : 5;
+    if (market === 'crypto') return (_sfLiveState && _sfLiveState.price != null && _sfLiveState.price < 10) ? 5 : 2;
+    return 2; // commodities/indices/stocks/synthetic default
+  }
+  function _sfFmtPrice(v, dec) {
+    if (v === null || v === undefined || isNaN(+v)) return '—';
+    return (+v).toFixed(dec);
+  }
+  function _sfFreshText(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - ts;
+    if (diff < 8000) return 'just now';
+    if (diff < 60000) return Math.max(1, Math.round(diff / 1000)) + 's ago';
+    if (diff < 3600000) return Math.round(diff / 60000) + 'm ago';
+    return Math.round(diff / 3600000) + 'h ago';
+  }
+
+  function _sfLiveStop() {
+    if (!_sfLiveState) return;
+    if (_sfLiveState.pollTimer) { clearInterval(_sfLiveState.pollTimer); _sfLiveState.pollTimer = null; }
+    if (_sfLiveState.uiTimer) { clearInterval(_sfLiveState.uiTimer); _sfLiveState.uiTimer = null; }
+  }
+
+  // Called every time the modal opens (new or edit) — resets state and,
+  // if a pair is already present (edit mode, or a prefilled draft),
+  // kicks off the first fetch immediately.
+  function _sfLiveInit() {
+    _sfLiveStop();
+    _sfLiveState = { pair: null, market: null, price: null, updatedAt: null, loading: false, error: null, pollTimer: null, uiTimer: null, token: 0, entryOverridden: false };
+    const pairVal = (document.getElementById('sf-pair')?.value || '').trim();
+    if (pairVal) _sfLiveStart(pairVal);
+    else _sfRenderLivePrice();
+  }
+
+  // Debounced handler for typing in the Pair field — separate from (and
+  // additive to) the existing symbol-search debounce, so neither one
+  // interferes with the other.
+  window._sfHandlePairInputDebounced = _debounce(function () { _sfPairMarketChanged(); }, 450);
+
+  // Fired immediately (no debounce) for discrete changes: picking a pair
+  // from the search dropdown, or switching Market.
+  window._sfPairMarketChanged = function () {
+    const pair = (document.getElementById('sf-pair')?.value || '').trim();
+    if (!pair) {
+      _sfLiveStop();
+      _sfLiveState = { pair: null, market: null, price: null, updatedAt: null, loading: false, error: null, pollTimer: null, uiTimer: null, token: (_sfLiveState?.token || 0) + 1, entryOverridden: false };
+      _sfRenderLivePrice();
+      return;
+    }
+    _sfLiveStart(pair);
+  };
+
+  function _sfLiveStart(pair) {
+    _sfLiveStop();
+    pair = pair.trim().toUpperCase();
+    const market = document.getElementById('sf-market')?.value || '';
+    _sfLiveState = {
+      pair, market, price: null, updatedAt: null, loading: true, error: null,
+      pollTimer: null, uiTimer: null, token: (_sfLiveState?.token || 0) + 1, entryOverridden: false,
+    };
+    _sfRenderLivePrice();
+    _sfFetchLivePrice();
+    // Refetch periodically while the modal stays open — reasonable interval,
+    // and the Edge Function's own cache absorbs repeated hits well within
+    // the vendor's free-tier limits.
+    _sfLiveState.pollTimer = setInterval(_sfFetchLivePrice, 20000);
+    // UI-only ticker so "Updated Xs ago" keeps moving between fetches,
+    // without any extra network calls.
+    _sfLiveState.uiTimer = setInterval(_sfRenderLivePrice, 5000);
+  }
+
+  async function _sfFetchLivePrice() {
+    const st = _sfLiveState;
+    if (!st || !st.pair) return;
+    if (!(_sigUsingSupabase && typeof sb !== 'undefined' && sb)) {
+      // Demo/local mode — no Edge Function to call. Fail gracefully.
+      st.loading = false; st.error = 'unavailable';
+      _sfRenderLivePrice();
+      return;
+    }
+    const targetPair = st.pair;
+    const myToken = ++st.token;
+    if (st.price == null) { st.loading = true; _sfRenderLivePrice(); }
+    try {
+      const symbol = _repGetSource('twelvedata').mapPair(targetPair);
+      const result = await _repFetchCandles(symbol, '1min', 10, 'twelvedata');
+      // Guard against a slower earlier request landing after a newer one
+      // (rapid instrument switching), and against the modal/pair having
+      // moved on while this was in flight.
+      if (!_sfLiveState || _sfLiveState !== st || st.token !== myToken || st.pair !== targetPair) return;
+      const candles = (result && result.candles) || [];
+      const last = candles[candles.length - 1];
+      if (!last || last.close == null || isNaN(+last.close)) throw new Error('no live price available');
+      st.price = +last.close;
+      st.updatedAt = Date.now();
+      st.loading = false;
+      st.error = null;
+      _sfRenderLivePrice();
+      _sfSyncEntryIfMarket();
+    } catch (err) {
+      if (!_sfLiveState || _sfLiveState !== st || st.token !== myToken || st.pair !== targetPair) return;
+      st.loading = false;
+      st.error = 'unavailable';
+      _sfRenderLivePrice();
+    }
+  }
+
+  // Market Execution: keep Entry synced to the live price unless the user
+  // has manually typed their own value since the last sync.
+  function _sfSyncEntryIfMarket() {
+    const st = _sfLiveState;
+    if (!st || st.price == null) return;
+    const orderType = document.getElementById('sf-ordertype')?.value || 'market';
+    if (PENDING_ORDER_TYPES.includes(orderType)) return; // pending orders are never auto-filled
+    if (st.entryOverridden) return; // respect the user's manual override
+    const entryEl = document.getElementById('sf-entry');
+    if (!entryEl) return;
+    entryEl.value = _sfFmtPrice(st.price, _sfLiveDecimals());
+    _sigModalState.dirty = true;
+    _sigSetAutosaveLabel('Unsaved changes');
+    if (window._sigAutoCalcTp1) window._sigAutoCalcTp1();
+  }
+
+  // Real keystroke in Entry (programmatic .value= sets from this feature
+  // never fire 'input') — the user has taken over, stop overwriting them.
+  window._sfHandleEntryManualInput = function () {
+    if (_sfLiveState) _sfLiveState.entryOverridden = true;
+    _sfRenderLivePrice();
+  };
+
+  window._sfHandleOrderTypeChange = function () {
+    const orderType = document.getElementById('sf-ordertype')?.value || 'market';
+    if (!PENDING_ORDER_TYPES.includes(orderType)) {
+      // Just switched to Market Execution — resume live-price sync.
+      if (_sfLiveState) _sfLiveState.entryOverridden = false;
+      _sfSyncEntryIfMarket();
+    }
+    _sfRenderLivePrice();
+  };
+
+  // "Use Live Price" — manual copy-into-Entry action for pending orders,
+  // and a way to re-arm auto-sync for Market Execution after an override.
+  window._sfUseLivePrice = function () {
+    const st = _sfLiveState;
+    if (!st || st.price == null) return;
+    const entryEl = document.getElementById('sf-entry');
+    if (entryEl) entryEl.value = _sfFmtPrice(st.price, _sfLiveDecimals());
+    st.entryOverridden = false;
+    _sigModalState.dirty = true;
+    _sigSetAutosaveLabel('Unsaved changes');
+    if (window._sigAutoCalcTp1) window._sigAutoCalcTp1();
+    _sfRenderLivePrice();
+  };
+
+  function _sfRenderLivePrice() {
+    const box = document.getElementById('sf-live-price');
+    if (!box) return; // modal closed / entry field not in this render
+    const st = _sfLiveState;
+    if (!st || !st.pair) { box.style.display = 'none'; box.innerHTML = ''; return; }
+
+    if (st.error && st.price == null) {
+      box.style.display = '';
+      box.dataset.state = 'unavailable';
+      box.innerHTML = `<span class="sf-live-price-dot"></span><span class="sf-live-price-text">Live price unavailable</span>`;
+      return;
+    }
+    if (st.loading && st.price == null) {
+      box.style.display = '';
+      box.dataset.state = 'loading';
+      box.innerHTML = `<span class="sf-live-price-dot"></span><span class="sf-live-price-text">Fetching live price…</span>`;
+      return;
+    }
+    if (st.price == null) { box.style.display = 'none'; box.innerHTML = ''; return; }
+
+    box.style.display = '';
+    box.dataset.state = st.error ? 'stale' : 'live';
+    const dec = _sfLiveDecimals();
+    const orderType = document.getElementById('sf-ordertype')?.value || 'market';
+    const isPending = PENDING_ORDER_TYPES.includes(orderType);
+    const syncedTag = (!isPending && !st.entryOverridden)
+      ? `<span class="sf-live-price-synced">${icn('ic-check')} Entry synced</span>` : '';
+    box.innerHTML = `
+      <span class="sf-live-price-status"><span class="sf-live-price-dot"></span><span class="sf-live-price-badge">Live</span></span>
+      <span class="sf-live-price-text">Live Price: <span class="sf-live-price-value sig-mono">${_sfFmtPrice(st.price, dec)}</span></span>
+      ${syncedTag}
+      <button type="button" class="sf-live-price-refresh" onclick="_sfUseLivePrice()" title="Use live price" aria-label="Use live price">${icn('ic-refresh')}</button>
+      <span class="sf-live-price-meta">${st.updatedAt ? 'Updated ' + _sfFreshText(st.updatedAt) : ''}</span>
+    `;
+  }
 
   function _sigCollectFormRow() {
     const val = id => document.getElementById(id)?.value;
@@ -4154,6 +4380,9 @@
     set('sf-tags', (f.tags || []).join(', '));
     _sigModalState.dirty = true;
     _sigSetAutosaveLabel('Unsaved changes');
+    // order_type may have just changed (e.g. template saved as Market Execution) —
+    // refresh the live-price card and re-sync Entry if it now applies.
+    if (window._sfHandleOrderTypeChange) window._sfHandleOrderTypeChange();
   }
 
   window._sigUseLastSignal = function () {
