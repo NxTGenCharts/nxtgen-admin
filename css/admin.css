@@ -40,6 +40,33 @@
   border-radius: var(--r-lg);
   padding: 14px 16px;
 }
+.adm-stat-card-clickable {
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, transform .1s ease;
+}
+.adm-stat-card-clickable:hover {
+  border-color: var(--gold);
+}
+.adm-stat-card-clickable:active { transform: scale(0.98); }
+.adm-stat-card-active {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold) inset;
+}
+.adm-archived-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--text2);
+}
+.adm-archived-banner strong { color: var(--text); }
+.adm-archived-banner .btn { flex-shrink: 0; }
 .adm-stat-num {
   font-family: var(--font-head);
   font-size: 24px;

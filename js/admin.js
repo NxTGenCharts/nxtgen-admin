@@ -19,6 +19,9 @@
   let _admStatusFilter = 'all';
   let _admVisFilter = 'all';
   let _admInitDone = false;
+  // When true, the table shows ONLY archived signals (entered by clicking
+  // the "Archived" stat card) instead of the normal active-signal list.
+  let _admShowArchived = false;
 
   function icn(id, cls) {
     return `<svg class="icn ${cls || ''}" aria-hidden="true"><use href="#${id}"></use></svg>`;
@@ -157,8 +160,8 @@
       <span id="adm-bulk-count">0 selected</span>
       <button class="btn" onclick="_admBulkVisibility('public')">${icn('ic-eye')} Publish (Public)</button>
       <button class="btn" onclick="_admBulkVisibility('private')">${icn('ic-eye-off')} Unpublish (Private)</button>
-      <button class="btn" onclick="_admBulkArchive(true)">${icn('ic-archive')} Archive</button>
-      <button class="btn" onclick="_admBulkArchive(false)">${icn('ic-folder-open')} Unarchive</button>
+      <button class="btn" id="adm-bulk-archive-btn" onclick="_admBulkArchive(true)">${icn('ic-archive')} Archive</button>
+      <button class="btn" id="adm-bulk-unarchive-btn" onclick="_admBulkArchive(false)" style="display:none">${icn('ic-folder-open')} Unarchive</button>
       <button class="btn glass-btn-danger" onclick="_admBulkDelete()">${icn('ic-trash')} Delete</button>
       <button class="btn" onclick="_admClearSelection()">Clear</button>
     </div>
@@ -172,6 +175,7 @@
   // ══════════════════════════════════════════════════════════════
   function _admFilteredRows() {
     let rows = _admAll;
+    rows = _admShowArchived ? rows.filter(s => s.archived) : rows.filter(s => !s.archived);
     if (_admStatusFilter !== 'all') rows = rows.filter(s => s.status === _admStatusFilter);
     if (_admVisFilter !== 'all') rows = rows.filter(s => s.visibility === _admVisFilter);
     if (_admSearch) {
@@ -197,7 +201,11 @@
       <div class="adm-stat-card"><div class="adm-stat-num">${total}</div><div class="adm-stat-lbl">Total signals</div></div>
       <div class="adm-stat-card"><div class="adm-stat-num">${published}</div><div class="adm-stat-lbl">Public</div></div>
       <div class="adm-stat-card"><div class="adm-stat-num">${drafts}</div><div class="adm-stat-lbl">Drafts</div></div>
-      <div class="adm-stat-card"><div class="adm-stat-num">${archived}</div><div class="adm-stat-lbl">Archived</div></div>
+      <div class="adm-stat-card adm-stat-card-clickable ${_admShowArchived ? 'adm-stat-card-active' : ''}"
+           title="${_admShowArchived ? 'Showing archived signals — click to go back' : 'Click to view archived signals'}"
+           onclick="_admToggleArchivedView()">
+        <div class="adm-stat-num">${archived}</div><div class="adm-stat-lbl">Archived</div>
+      </div>
     `;
   }
 
@@ -208,6 +216,15 @@
     return `<span class="sig-result-badge pending">${icn('ic-clock')}Pending</span>`;
   }
 
+  function _admArchivedBanner() {
+    if (!_admShowArchived) return '';
+    return `
+    <div class="adm-archived-banner">
+      <span>${icn('ic-archive')} Viewing <strong>archived</strong> signals only. Unarchive one to return it to the main table.</span>
+      <button class="btn" onclick="_admToggleArchivedView()">${icn('ic-arrow-left')} Back to signals</button>
+    </div>`;
+  }
+
   function _admRender() {
     _admRenderStats();
     const root = document.getElementById('adm-table-root');
@@ -215,7 +232,8 @@
     const rows = _admFilteredRows();
 
     if (!rows.length) {
-      root.innerHTML = `<div class="sig-table-card"><div class="sig-table-empty">${icn('ic-search')}<div style="margin-top:8px">No signals match these filters.</div></div></div>`;
+      const emptyMsg = _admShowArchived ? 'No archived signals.' : 'No signals match these filters.';
+      root.innerHTML = `${_admArchivedBanner()}<div class="sig-table-card"><div class="sig-table-empty">${icn('ic-search')}<div style="margin-top:8px">${emptyMsg}</div></div></div>`;
       _admUpdateBulkBar();
       return;
     }
@@ -238,9 +256,11 @@
             <option value="private" ${s.visibility === 'private' ? 'selected' : ''}>Private</option>
           </select>
         </td>
-        <td>${s.archived ? `<span class="sig-badge sig-badge-archived"><span class="dot"></span>Archived</span>` : '—'}</td>
         <td>${_admTimeAgo(s.created_at)}</td>
         <td class="adm-row-actions" onclick="event.stopPropagation()">
+          ${_admShowArchived
+            ? `<button title="Unarchive" onclick="_admUnarchiveOne('${s.id}')">${icn('ic-folder-open')}</button>`
+            : ''}
           <button title="Edit" onclick="_admEdit('${s.id}')">${icn('ic-edit')}</button>
           <button title="Add Update" onclick="_admAddUpdate('${s.id}')">${icn('ic-notebook')}</button>
           <button title="Delete" onclick="_admDeleteOne('${s.id}')">${icn('ic-trash')}</button>
@@ -249,12 +269,13 @@
     }).join('');
 
     root.innerHTML = `
+    ${_admArchivedBanner()}
     <div class="sig-table-card adm-signals-table-card">
       <div class="sig-table-scroll">
         <table>
           <thead><tr>
             <th><input type="checkbox" id="adm-select-all" onchange="_admSelectAll(this.checked)"></th>
-            <th>Date Taken</th><th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Result</th><th>Visibility</th><th>Archived</th><th>Created</th><th>Actions</th>
+            <th>Date Taken</th><th>Pair</th><th>Market</th><th>Direction</th><th>Status</th><th>Result</th><th>Visibility</th><th>Created</th><th>Actions</th>
           </tr></thead>
           <tbody>${body}</tbody>
         </table>
@@ -276,6 +297,10 @@
       const rows = _admFilteredRows();
       selectAll.checked = rows.length > 0 && rows.every(s => _admSelected.has(s.id));
     }
+    const archiveBtn = document.getElementById('adm-bulk-archive-btn');
+    const unarchiveBtn = document.getElementById('adm-bulk-unarchive-btn');
+    if (archiveBtn) archiveBtn.style.display = _admShowArchived ? 'none' : '';
+    if (unarchiveBtn) unarchiveBtn.style.display = _admShowArchived ? '' : 'none';
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -284,6 +309,11 @@
   window._admOnSearch = function (v) { _admSearch = v.trim().toLowerCase(); _admRender(); };
   window._admSetStatusFilter = function (v) { _admStatusFilter = v; _admRender(); };
   window._admSetVisFilter = function (v) { _admVisFilter = v; _admRender(); };
+  window._admToggleArchivedView = function () {
+    _admShowArchived = !_admShowArchived;
+    _admSelected.clear();
+    _admRender();
+  };
   window._admRefresh = async function () {
     _admAll = await _admFetchAll();
     _admSelected.clear();
@@ -350,6 +380,15 @@
     if (error) { showToast('Bulk update failed: ' + error.message, 'error'); return; }
     showToast(`${ids.length} signal(s) ${archived ? 'archived' : 'unarchived'}`, 'success');
     _admSelected.clear();
+    await _admReloadEverywhere();
+  };
+
+  window._admUnarchiveOne = async function (id) {
+    if (typeof sb === 'undefined' || !sb) return;
+    const { error } = await sb.from('journal_signals').update({ archived: false }).eq('id', id);
+    if (error) { showToast('Unarchive failed: ' + error.message, 'error'); return; }
+    showToast('Signal unarchived', 'success');
+    _admSelected.delete(id);
     await _admReloadEverywhere();
   };
 
