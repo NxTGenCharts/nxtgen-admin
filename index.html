@@ -92,6 +92,7 @@
 <link rel="stylesheet" href="css/tradelog-premium.css?v=202607220200">
 <link rel="stylesheet" href="css/calendar-premium.css?v=202607220200">
 <link rel="stylesheet" href="css/mobile-nav-smart-dock.css?v=202607220300">
+<link rel="stylesheet" href="css/toast-notifications.css?v=202608051000">
 
 <style>
   /* ══ App Splash / Global Loading Screen (Admin console) ══
@@ -2213,8 +2214,9 @@
   </div>
 </div>
 
-<!-- ══ APP TOAST ══ -->
-<div class="app-toast" id="app-toast"></div>
+<!-- ══ NOTIFICATION SYSTEM — premium toast viewport ══ -->
+<div class="nx-toast-viewport" id="nx-toast-viewport" aria-live="polite" aria-atomic="false" aria-relevant="additions"></div>
+<div class="nx-toast-sr-assertive" id="nx-toast-sr-assertive" role="alert" aria-live="assertive" aria-atomic="true"></div>
 
 <!-- ══ Supabase SDK ══ -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -2296,6 +2298,7 @@
 <!-- ══ App Script — split into ordered chunks (loaded in the exact same order as the old single app.js, so execution behaves identically) ══ -->
  <script src="realtime-sync.js"></script>
 <script src="js/core-utils-ai.js?v=202607291415"></script>
+<script src="js/toast-notifications.js?v=202608051000"></script>
 <script src="js/nav-dashboard-trades.js?v=202607291300"></script>
 <script src="js/watchlist.js?v=202607202045"></script>
 <script src="js/accounts.js?v=202607202045"></script>
