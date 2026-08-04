@@ -22,6 +22,11 @@
   // When true, the table shows ONLY archived signals (entered by clicking
   // the "Archived" stat card) instead of the normal active-signal list.
   let _admShowArchived = false;
+  // Same idea for drafts (entered by clicking the "Drafts" stat card).
+  // Mutually exclusive with _admShowArchived — turning one on turns the
+  // other off, same as the main table only ever shows one special view
+  // at a time.
+  let _admShowDrafts = false;
 
   function icn(id, cls) {
     return `<svg class="icn ${cls || ''}" aria-hidden="true"><use href="#${id}"></use></svg>`;
@@ -175,7 +180,16 @@
   // ══════════════════════════════════════════════════════════════
   function _admFilteredRows() {
     let rows = _admAll;
-    rows = _admShowArchived ? rows.filter(s => s.archived) : rows.filter(s => !s.archived);
+    if (_admShowDrafts) {
+      rows = rows.filter(s => s.is_draft);
+    } else if (_admShowArchived) {
+      rows = rows.filter(s => s.archived);
+    } else {
+      // Main table: drafts and archived signals each have their own
+      // dedicated view (via the stat cards above), so keep them out of
+      // the everyday list.
+      rows = rows.filter(s => !s.archived && !s.is_draft);
+    }
     if (_admStatusFilter !== 'all') rows = rows.filter(s => s.status === _admStatusFilter);
     if (_admVisFilter !== 'all') rows = rows.filter(s => s.visibility === _admVisFilter);
     if (_admSearch) {
@@ -193,14 +207,20 @@
   function _admRenderStats() {
     const el = document.getElementById('adm-stats');
     if (!el) return;
-    const total = _admAll.length;
-    const published = _admAll.filter(s => s.visibility === 'public').length;
+    // Total excludes drafts and archived signals — those aren't "live"
+    // signals, they each get their own dedicated view below.
+    const total = _admAll.filter(s => !s.archived && !s.is_draft).length;
+    const published = _admAll.filter(s => s.visibility === 'public' && !s.archived && !s.is_draft).length;
     const drafts = _admAll.filter(s => s.is_draft).length;
     const archived = _admAll.filter(s => s.archived).length;
     el.innerHTML = `
       <div class="adm-stat-card"><div class="adm-stat-num">${total}</div><div class="adm-stat-lbl">Total signals</div></div>
       <div class="adm-stat-card"><div class="adm-stat-num">${published}</div><div class="adm-stat-lbl">Public</div></div>
-      <div class="adm-stat-card"><div class="adm-stat-num">${drafts}</div><div class="adm-stat-lbl">Drafts</div></div>
+      <div class="adm-stat-card adm-stat-card-clickable ${_admShowDrafts ? 'adm-stat-card-active' : ''}"
+           title="${_admShowDrafts ? 'Showing drafts — click to go back' : 'Click to view drafts'}"
+           onclick="_admToggleDraftsView()">
+        <div class="adm-stat-num">${drafts}</div><div class="adm-stat-lbl">Drafts</div>
+      </div>
       <div class="adm-stat-card adm-stat-card-clickable ${_admShowArchived ? 'adm-stat-card-active' : ''}"
            title="${_admShowArchived ? 'Showing archived signals — click to go back' : 'Click to view archived signals'}"
            onclick="_admToggleArchivedView()">
@@ -216,13 +236,22 @@
     return `<span class="sig-result-badge pending">${icn('ic-clock')}Pending</span>`;
   }
 
-  function _admArchivedBanner() {
-    if (!_admShowArchived) return '';
-    return `
-    <div class="adm-archived-banner">
-      <span>${icn('ic-archive')} Viewing <strong>archived</strong> signals only. Unarchive one to return it to the main table.</span>
-      <button class="btn" onclick="_admToggleArchivedView()">${icn('ic-arrow-left')} Back to signals</button>
-    </div>`;
+  function _admViewBanner() {
+    if (_admShowDrafts) {
+      return `
+      <div class="adm-archived-banner">
+        <span>${icn('ic-notebook')} Viewing <strong>draft</strong> signals only. Publish one to move it into the main table.</span>
+        <button class="btn" onclick="_admToggleDraftsView()">${icn('ic-arrow-left')} Back to signals</button>
+      </div>`;
+    }
+    if (_admShowArchived) {
+      return `
+      <div class="adm-archived-banner">
+        <span>${icn('ic-archive')} Viewing <strong>archived</strong> signals only. Unarchive one to return it to the main table.</span>
+        <button class="btn" onclick="_admToggleArchivedView()">${icn('ic-arrow-left')} Back to signals</button>
+      </div>`;
+    }
+    return '';
   }
 
   function _admRender() {
@@ -232,8 +261,8 @@
     const rows = _admFilteredRows();
 
     if (!rows.length) {
-      const emptyMsg = _admShowArchived ? 'No archived signals.' : 'No signals match these filters.';
-      root.innerHTML = `${_admArchivedBanner()}<div class="sig-table-card"><div class="sig-table-empty">${icn('ic-search')}<div style="margin-top:8px">${emptyMsg}</div></div></div>`;
+      const emptyMsg = _admShowDrafts ? 'No draft signals.' : _admShowArchived ? 'No archived signals.' : 'No signals match these filters.';
+      root.innerHTML = `${_admViewBanner()}<div class="sig-table-card"><div class="sig-table-empty">${icn('ic-search')}<div style="margin-top:8px">${emptyMsg}</div></div></div>`;
       _admUpdateBulkBar();
       return;
     }
@@ -261,6 +290,9 @@
           ${_admShowArchived
             ? `<button title="Unarchive" onclick="_admUnarchiveOne('${s.id}')">${icn('ic-folder-open')}</button>`
             : ''}
+          ${_admShowDrafts
+            ? `<button title="Publish" onclick="_sigOpenReviewModal('${s.id}')">${icn('ic-upload')}</button>`
+            : ''}
           <button title="Edit" onclick="_admEdit('${s.id}')">${icn('ic-edit')}</button>
           <button title="Add Update" onclick="_admAddUpdate('${s.id}')">${icn('ic-notebook')}</button>
           <button title="Delete" onclick="_admDeleteOne('${s.id}')">${icn('ic-trash')}</button>
@@ -269,7 +301,7 @@
     }).join('');
 
     root.innerHTML = `
-    ${_admArchivedBanner()}
+    ${_admViewBanner()}
     <div class="sig-table-card adm-signals-table-card">
       <div class="sig-table-scroll">
         <table>
@@ -311,6 +343,13 @@
   window._admSetVisFilter = function (v) { _admVisFilter = v; _admRender(); };
   window._admToggleArchivedView = function () {
     _admShowArchived = !_admShowArchived;
+    if (_admShowArchived) _admShowDrafts = false; // the two special views are mutually exclusive
+    _admSelected.clear();
+    _admRender();
+  };
+  window._admToggleDraftsView = function () {
+    _admShowDrafts = !_admShowDrafts;
+    if (_admShowDrafts) _admShowArchived = false;
     _admSelected.clear();
     _admRender();
   };
